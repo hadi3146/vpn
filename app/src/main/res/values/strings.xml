@@ -1,0 +1,62 @@
+<resources>
+    <string name="app_name">Aether VPN</string>
+    <string name="quick_settings_tile_label">Aether VPN</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_authenticating">Authenticating…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_disconnecting">Disconnecting…</string>
+    <string name="status_error">Error</string>
+
+    <string name="nav_home">Home</string>
+    <string name="nav_servers">Servers</string>
+    <string name="nav_dns">DNS-over-TLS</string>
+    <string name="nav_apps">Per-App Filter</string>
+    <string name="nav_settings">Settings</string>
+    <string name="nav_logs">Logs</string>
+
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="quick_connect">Quick Connect</string>
+    <string name="public_ip">Public IP</string>
+    <string name="duration">Duration</string>
+    <string name="download_speed">Download</string>
+    <string name="upload_speed">Upload</string>
+    <string name="data_transferred">Data Transferred</string>
+
+    <string name="search_servers">Search servers by country or host…</string>
+    <string name="add_custom_server">Add Custom Server</string>
+    <string name="host">Host / Address</string>
+    <string name="port">Port</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="custom_sni">Custom SNI (Optional)</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="dns_mode_title">DNS Mode</string>
+    <string name="dns_mode_default">Standard VPN DNS</string>
+    <string name="dns_mode_dot">DNS-over-TLS through SSTP</string>
+    <string name="dns_mode_only">DNS-Only Mode (No Tunnel)</string>
+
+    <string name="split_tunnel_title">Split Tunneling</string>
+    <string name="split_mode_all">All Applications use VPN</string>
+    <string name="split_mode_allowed">Only Selected Applications use VPN</string>
+    <string name="split_mode_disallowed">All Except Selected use VPN</string>
+    <string name="show_system_apps">Show system apps</string>
+
+    <string name="sni_bypass_title">SNI-Blocking Bypass</string>
+    <string name="sni_auto">Direct / No SNI</string>
+    <string name="sni_tcp_frag">TCP ClientHello Fragmentation</string>
+    <string name="sni_tls_frag">TLS Record Fragmentation</string>
+
+    <string name="strict_cert_title">Strict Certificate Validation</string>
+    <string name="strict_cert_desc">Off for volunteer VPN Gate servers, on for trusted custom servers.</string>
+
+    <string name="kill_switch_title">Kill Switch</string>
+    <string name="kill_switch_desc">Block network traffic if the tunnel disconnects unexpectedly.</string>
+
+    <string name="disclaimer_title">Volunteer Network Notice</string>
+    <string name="disclaimer_text">VPN Gate servers are hosted by public volunteers around the world. Operators may inspect or log connection traffic according to local laws. Do not use for sensitive or confidential tasks.</string>
+    <string name="disclaimer_accept">I Understand</string>
+</resources>

@@ -1,0 +1,6 @@
+*vpn_servers
+#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,Uptime,TotalUsers,TotalTraffic,LogType,Operator,Message,OpenVPN_ConfigData_Base64
+vg2191986422.opengw.net,219.100.37.240,845620,15,48392019,Japan,JP,142,3928172,591823,892381928,2w,VPNGate,Volunteer Server,
+vg1031922312.opengw.net,103.152.220.12,624100,28,32198421,United States,US,88,1827461,281921,491827182,2w,VPNGate,Volunteer Server,
+vg1852201011.opengw.net,185.220.101.5,512000,42,25192831,Germany,DE,75,982712,192831,391827110,2w,VPNGate,Volunteer Server,
+*
