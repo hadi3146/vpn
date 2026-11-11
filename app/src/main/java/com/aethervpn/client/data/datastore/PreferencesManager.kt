@@ -48,7 +48,7 @@ data class UserSettings(
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.ALL_APPS,
     val allowedPackages: Set<String> = emptySet(),
     val disallowedPackages: Set<String> = emptySet(),
-    val mirrorUrls: String = "https://www.vpngate.net/api/iphone/",
+    val mirrorUrls: String = "https://www.vpngate.net/api/iphone/\nhttp://www.vpngate.net/api/iphone/",
     val appLanguage: String = "system"
 )
 

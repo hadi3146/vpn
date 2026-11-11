@@ -12,6 +12,9 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface VpnServerDao {
 
+    @Query("SELECT COUNT(*) FROM vpn_servers")
+    suspend fun getServerCount(): Int
+
     @Query("SELECT * FROM vpn_servers ORDER BY isFavorite DESC, score DESC, ping ASC")
     fun getAllServers(): Flow<List<VpnServer>>
 

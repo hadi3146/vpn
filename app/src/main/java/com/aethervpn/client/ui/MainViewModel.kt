@@ -2,6 +2,7 @@ package com.aethervpn.client.ui
 
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aethervpn.client.data.datastore.DnsMode
@@ -47,15 +48,23 @@ class MainViewModel @Inject constructor(
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
-    val logs: StateFlow<List<String>> = _logs.asStateFlow()
+    val logs: StateFlow<List<String>> = VpnStateHolder.logs
 
     init {
+        viewModelScope.launch {
+            serverRepository.ensureInitialized()
+            servers.collect { list ->
+                if (_selectedServer.value == null && list.isNotEmpty()) {
+                    _selectedServer.value = list.first()
+                }
+            }
+        }
         refreshServers()
     }
 
     fun selectServer(server: VpnServer) {
         _selectedServer.value = server
+        VpnStateHolder.log("Selected server: ${server.countryLong.ifBlank { server.hostName }} (${server.ip}:${server.customPort})")
     }
 
     fun setSearchQuery(query: String) {
@@ -72,17 +81,32 @@ class MainViewModel @Inject constructor(
     }
 
     fun connectSelectedServer() {
-        val server = _selectedServer.value ?: servers.value.firstOrNull() ?: return
+        val server = _selectedServer.value ?: servers.value.firstOrNull()
+        if (server == null) {
+            addLog("No server selected. Initializing server list...")
+            viewModelScope.launch {
+                serverRepository.ensureInitialized()
+            }
+            return
+        }
         connect(server)
     }
 
     fun quickConnect() {
-        val best = servers.value.maxByOrNull { it.score } ?: return
-        _selectedServer.value = best
-        connect(best)
+        val best = servers.value.maxByOrNull { it.score } ?: servers.value.firstOrNull()
+        if (best != null) {
+            _selectedServer.value = best
+            connect(best)
+        } else {
+            addLog("No server available for Quick Connect. Prepopulating...")
+            viewModelScope.launch {
+                serverRepository.ensureInitialized()
+            }
+        }
     }
 
     private fun connect(server: VpnServer) {
+        _selectedServer.value = server
         val intent = Intent(context, AetherVpnService::class.java).apply {
             action = AetherVpnService.ACTION_CONNECT
             putExtra(AetherVpnService.EXTRA_SERVER_HOST, server.hostName)
@@ -92,15 +116,23 @@ class MainViewModel @Inject constructor(
             putExtra(AetherVpnService.EXTRA_SERVER_PASS, server.customPassword)
             putExtra(AetherVpnService.EXTRA_SERVER_COUNTRY, server.countryLong)
         }
-        context.startService(intent)
-        addLog("Initiating connection to ${server.hostName}...")
+        try {
+            ContextCompat.startForegroundService(context, intent)
+            addLog("Connecting to ${server.countryLong.ifBlank { server.hostName }} (${server.ip}:${server.customPort})...")
+        } catch (e: Exception) {
+            addLog("Failed to start VPN service: ${e.message}")
+        }
     }
 
     fun disconnect() {
         val intent = Intent(context, AetherVpnService::class.java).apply {
             action = AetherVpnService.ACTION_DISCONNECT
         }
-        context.startService(intent)
+        try {
+            ContextCompat.startForegroundService(context, intent)
+        } catch (_: Exception) {
+            context.stopService(intent)
+        }
         addLog("Disconnected by user.")
     }
 
@@ -181,13 +213,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun addLog(entry: String) {
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-        val redacted = entry.replace(Regex("(?i)password[:=]\\s*\\S+"), "password=********")
-        _logs.value = listOf("[$timestamp] $redacted") + _logs.value.take(200)
+        VpnStateHolder.log(entry)
     }
 
     fun clearLogs() {
-        _logs.value = emptyList()
+        VpnStateHolder.clearLogs()
     }
 }
 

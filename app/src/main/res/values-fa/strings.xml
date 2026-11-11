@@ -23,6 +23,7 @@
     <string name="download_speed">دانلود</string>
     <string name="upload_speed">آپلود</string>
     <string name="data_transferred">حجم مصرفی</string>
+    <string name="select_server">انتخاب سرور</string>
 
     <string name="search_servers">جستجوی سرور بر اساس کشور یا آدرس…</string>
     <string name="add_custom_server">افزودن سرور شخصی</string>

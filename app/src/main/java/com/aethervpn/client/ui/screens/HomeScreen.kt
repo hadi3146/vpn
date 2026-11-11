@@ -240,14 +240,26 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = selectedServer?.countryLong?.ifBlank { selectedServer.hostName } ?: "Select Server",
+                        text = selectedServer?.countryLong?.ifBlank { selectedServer.hostName } ?: stringResource(R.string.select_server),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = selectedServer?.hostName ?: "Tap to choose a VPN server",
+                        text = if (selectedServer != null) {
+                            "${selectedServer.hostName} (${selectedServer.ip}:${selectedServer.customPort})"
+                        } else {
+                            "Tap to choose a VPN server"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (selectedServer != null && selectedServer.ping >= 0) {
+                    Text(
+                        text = "${selectedServer.ping} ms",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AccentGreen,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }

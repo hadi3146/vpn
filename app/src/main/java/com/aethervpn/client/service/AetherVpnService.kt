@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -130,13 +131,27 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
         prevTxBytes.set(0)
         prevRxBytes.set(0)
 
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting to ${server.hostName}..."))
-        VpnStateHolder.updateStatus(VpnStatus.CONNECTING, "Resolving host...")
+        val notification = buildNotification("Connecting to ${server.countryLong.ifBlank { server.hostName }}...")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            VpnStateHolder.log("Error starting foreground service: ${e.message}")
+        }
+
+        VpnStateHolder.updateStatus(VpnStatus.CONNECTING, "Resolving host ${server.hostName}...")
 
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
-        connectivityManager.registerNetworkCallback(request, networkCallback)
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback)
+        } catch (e: Exception) {
+            VpnStateHolder.log("NetworkCallback registration warning: ${e.message}")
+        }
 
         serviceScope.launch(Dispatchers.IO) {
             val prefManager = PreferencesManager(applicationContext)
@@ -164,6 +179,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
             for (strategy in strategies) {
                 if (!isRunning.get()) break
                 try {
+                    VpnStateHolder.log("Connecting to ${server.ip}:${server.customPort} (Strategy: $strategy)...")
                     val inetAddr = InetAddress.getByName(server.ip)
                     val sstpConfig = SstpConfig(
                         host = server.hostName,
@@ -188,6 +204,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                     connected = true
                     break
                 } catch (e: Exception) {
+                    VpnStateHolder.log("Strategy $strategy error: ${e.message ?: e.javaClass.simpleName}")
                     if (isRunning.get()) {
                         delay(1000)
                     }
@@ -195,7 +212,9 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
             }
 
             if (!connected && isRunning.get()) {
-                VpnStateHolder.updateStatus(VpnStatus.ERROR, "Failed to connect to server")
+                VpnStateHolder.updateStatus(VpnStatus.ERROR, "Failed to connect to ${server.countryLong.ifBlank { server.hostName }}")
+                VpnStateHolder.log("All connection strategies failed. Stopping VPN.")
+                delay(2500)
                 stopVpn()
             }
         }
@@ -349,6 +368,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
 
     private fun stopVpn() {
         if (!isRunning.compareAndSet(true, false)) return
+        VpnStateHolder.log("Disconnecting tunnel...")
         metricsJob?.cancel()
         tunReaderJob?.cancel()
         tunWriterJob?.cancel()

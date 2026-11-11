@@ -1,13 +1,18 @@
 package com.aethervpn.client.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
@@ -44,27 +49,52 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.addLog("Notification permission granted.")
+        }
+    }
+
     private val vpnConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.addLog("VPN permission granted by user.")
             viewModel.connectSelectedServer()
         } else {
             viewModel.addLog("VPN permission was denied by user.")
+            Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
     }
 
     private fun checkAndConnectVpn() {
+        requestNotificationPermissionIfNeeded()
         val intent = VpnService.prepare(this)
         if (intent != null) {
+            viewModel.addLog("Requesting VPN system consent...")
             vpnConsentLauncher.launch(intent)
         } else {
+            val server = viewModel.selectedServer.value ?: viewModel.servers.value.firstOrNull()
+            if (server != null) {
+                Toast.makeText(this, "Connecting to ${server.countryLong.ifBlank { server.hostName }}...", Toast.LENGTH_SHORT).show()
+            }
             viewModel.connectSelectedServer()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
         setContent {
             AetherVpnTheme {
                 MainAppContent(
