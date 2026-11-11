@@ -121,3 +121,4 @@ object VpnGateCsvParser {
         return tokens
     }
 }
+

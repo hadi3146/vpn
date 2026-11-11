@@ -26,3 +26,4 @@ curl -k -i -X SSTP_DUPLEX_POST https://localhost/sra_{BA195980-CD49-458b-9E23-C8
   -H "Content-Length: 18446744073709551615"
 ```
 Server should respond with `HTTP/1.1 200 OK` (or 200 with blank line awaiting SSTP control frames).
+

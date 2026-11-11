@@ -146,3 +146,4 @@ class PreferencesManager(private val context: Context) {
         context.dataStore.edit { it[Keys.APP_LANGUAGE] = lang }
     }
 }
+

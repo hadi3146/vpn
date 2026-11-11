@@ -45,3 +45,4 @@ interface VpnServerDao {
     @Query("DELETE FROM vpn_servers WHERE hostName = :hostName")
     suspend fun deleteByHost(hostName: String)
 }
+

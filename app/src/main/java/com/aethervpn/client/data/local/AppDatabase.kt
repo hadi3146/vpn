@@ -8,3 +8,4 @@ import com.aethervpn.client.data.model.VpnServer
 abstract class AppDatabase : RoomDatabase() {
     abstract fun vpnServerDao(): VpnServerDao
 }
+

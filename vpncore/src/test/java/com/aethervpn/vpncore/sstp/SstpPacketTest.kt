@@ -53,3 +53,4 @@ class SstpPacketTest {
         assertEquals(0, decoded.attributes.size)
     }
 }
+

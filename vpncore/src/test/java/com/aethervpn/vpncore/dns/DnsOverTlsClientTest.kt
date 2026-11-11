@@ -28,7 +28,9 @@ class DnsOverTlsClientTest {
             0x12, 0x34, // ID
             0x01, 0x00, // Standard query
             0x00, 0x01, // Questions: 1
-            0x00, 0x00, 0x00, 0x00, // Answers, Authority, Additional: 0
+            0x00, 0x00, // Answers: 0
+            0x00, 0x00, // Authority: 0
+            0x00, 0x00, // Additional: 0
             0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
             0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
             0x00, // Null root
@@ -39,3 +41,4 @@ class DnsOverTlsClientTest {
         assertEquals(29, exampleQuery.size)
     }
 }
+

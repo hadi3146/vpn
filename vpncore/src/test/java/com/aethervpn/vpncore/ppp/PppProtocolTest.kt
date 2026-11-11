@@ -72,3 +72,4 @@ class PppProtocolTest {
         assertArrayEquals(challenge, decoded.data)
     }
 }
+

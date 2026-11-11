@@ -65,3 +65,4 @@ object VpnStateHolder {
         _state.value = VpnSessionState()
     }
 }
+

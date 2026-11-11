@@ -85,3 +85,4 @@ Deep Packet Inspection (DPI) censorship equipment monitors the unencrypted `Serv
 2. The packet payload (DNS wire format) is forwarded over an established TLS connection on port 853 to the user's selected DoT resolver (Cloudflare, Google, Quad9, AdGuard).
 3. The resolver's response is encapsulated into a synthesized IPv4 UDP packet matching the client's original query port and written back to the TUN descriptor.
 4. In **DNS-Only Mode**, the VPN routes only the dummy DNS address (`10.254.254.254/32`), allowing all general app traffic to bypass the VPN tunnel entirely.
+

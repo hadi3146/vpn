@@ -45,3 +45,4 @@ class VpnGateCsvParserTest {
         assertEquals("United States", servers[1].countryLong)
     }
 }
+

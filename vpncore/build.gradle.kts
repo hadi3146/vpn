@@ -41,3 +41,7 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
 }
 
+tasks.matching { it.name.startsWith("extract") && it.name.endsWith("Annotations") }.configureEach {
+    enabled = false
+}
+

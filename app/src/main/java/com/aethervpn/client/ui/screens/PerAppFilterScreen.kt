@@ -218,3 +218,4 @@ fun SplitModeOption(label: String, selected: Boolean, onClick: () -> Unit) {
         Text(text = label, modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
     }
 }
+

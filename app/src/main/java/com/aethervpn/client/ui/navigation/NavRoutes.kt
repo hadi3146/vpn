@@ -1,10 +1,10 @@
 package com.aethervpn.client.ui.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -15,7 +15,7 @@ sealed class Screen(val route: String, val titleResId: Int, val icon: ImageVecto
     data object Dns : Screen("dns", com.aethervpn.client.R.string.nav_dns, Icons.Default.Dns)
     data object PerApp : Screen("per_app", com.aethervpn.client.R.string.nav_apps, Icons.Default.Apps)
     data object Settings : Screen("settings", com.aethervpn.client.R.string.nav_settings, Icons.Default.Settings)
-    data object Logs : Screen("logs", com.aethervpn.client.R.string.nav_logs, Icons.Default.List)
+    data object Logs : Screen("logs", com.aethervpn.client.R.string.nav_logs, Icons.AutoMirrored.Filled.List)
 }
 
 val BottomNavScreens = listOf(
@@ -26,3 +26,4 @@ val BottomNavScreens = listOf(
     Screen.Settings,
     Screen.Logs
 )
+

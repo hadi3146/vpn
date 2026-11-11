@@ -4,6 +4,7 @@ import android.content.Context
 import com.aethervpn.client.data.local.VpnServerDao
 import com.aethervpn.client.data.model.VpnServer
 import com.aethervpn.client.data.source.VpnGateCsvParser
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -18,7 +19,7 @@ import javax.inject.Singleton
 
 @Singleton
 class ServerRepository @Inject constructor(
-    private val context: Context,
+    @ApplicationContext private val context: Context,
     private val vpnServerDao: VpnServerDao,
     private val okHttpClient: OkHttpClient
 ) {
@@ -103,3 +104,4 @@ class ServerRepository @Inject constructor(
         null
     }
 }
+

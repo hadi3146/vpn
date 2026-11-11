@@ -190,3 +190,4 @@ class MainViewModel @Inject constructor(
         _logs.value = emptyList()
     }
 }
+

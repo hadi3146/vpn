@@ -36,3 +36,4 @@ class CryptoBindingTest {
         assertNotNull(computed)
     }
 }
+

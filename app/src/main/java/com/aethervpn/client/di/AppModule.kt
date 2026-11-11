@@ -49,3 +49,4 @@ object AppModule {
         return PreferencesManager(context)
     }
 }
+

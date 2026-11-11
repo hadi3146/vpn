@@ -28,3 +28,4 @@ data class VpnServer(
     val customPassword: String = "vpn",
     val customSni: String? = null
 )
+
