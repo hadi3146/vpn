@@ -1925,7 +1925,11 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
 
                 if (settings.dnsMode != DnsMode.DNS_ONLY) {
                     MssClamper.clampMss(buffer, length, maxMss)
-                    activeTunnelClient?.sendIpPacket(buffer, length)
+                    try {
+                        activeTunnelClient?.sendIpPacket(buffer, length)
+                    } catch (e: Exception) {
+                        // Prevent any client/socket write exception from crashing the tun reader coroutine
+                    }
                 }
             }
         }

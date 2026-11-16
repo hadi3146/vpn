@@ -173,21 +173,29 @@ class SoftEtherChannel(
 
     /**
      * Transmit a single Ethernet frame over this channel.
+     * Returns true if frame was successfully written, or false if channel write failed / disconnected.
      */
-    fun sendEthernetFrame(frame: ByteArray) {
-        val out = output ?: return
-        if (!isConnected.get()) return
+    fun sendEthernetFrame(frame: ByteArray): Boolean {
+        val out = output ?: return false
+        if (!isConnected.get()) return false
 
-        synchronized(writeLock) {
-            txBuffer.clear()
-            txBuffer.putInt(1) // 1 frame
-            txBuffer.putInt(frame.size)
-            txBuffer.put(frame)
-            txBuffer.flip()
+        return synchronized(writeLock) {
+            try {
+                txBuffer.clear()
+                txBuffer.putInt(1) // 1 frame
+                txBuffer.putInt(frame.size)
+                txBuffer.put(frame)
+                txBuffer.flip()
 
-            out.write(txBuffer.array(), 0, txBuffer.limit())
-            out.flush()
-            txBytes.addAndGet(txBuffer.limit().toLong())
+                out.write(txBuffer.array(), 0, txBuffer.limit())
+                out.flush()
+                txBytes.addAndGet(txBuffer.limit().toLong())
+                true
+            } catch (e: Exception) {
+                isConnected.set(false)
+                close()
+                false
+            }
         }
     }
 
@@ -204,7 +212,10 @@ class SoftEtherChannel(
                 txBuffer.flip()
                 out.write(txBuffer.array(), 0, txBuffer.limit())
                 out.flush()
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                isConnected.set(false)
+                close()
+            }
         }
     }
 

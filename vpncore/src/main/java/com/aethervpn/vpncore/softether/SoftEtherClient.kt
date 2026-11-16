@@ -4,6 +4,7 @@ import com.aethervpn.vpncore.sstp.SstpTrafficSnapshot
 import com.aethervpn.vpncore.transport.SniStrategy
 import com.aethervpn.vpncore.transport.SocketProtector
 import com.aethervpn.vpncore.transport.TunnelClient
+import java.io.IOException
 import java.net.InetAddress
 import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
@@ -218,10 +219,14 @@ class SoftEtherClient(
 
             // 4. Supervision loop
             while (scope.isActive && isRunning.get()) {
-                delay(5000)
+                delay(3000)
                 cleanupDeadChannels()
+                val aliveCount = channels.count { it.isConnected.get() }
+                if (aliveCount == 0) {
+                    throw IOException("All SoftEther channels disconnected")
+                }
                 ensureChannelsCount(scope, effectiveTarget)
-                for (ch in channels) {
+                for (ch in channels.filter { it.isConnected.get() }) {
                     ch.sendKeepalive()
                 }
                 if (gatewayMac.contentEquals(SoftEtherFrame.BROADCAST_MAC)) {
@@ -436,28 +441,40 @@ class SoftEtherClient(
      */
     override fun sendIpPacket(packet: ByteArray, length: Int) {
         if (!isRunning.get() || length <= 0) return
-        val activeList = channels.filter { it.isConnected.get() }
-        if (activeList.isEmpty()) return
+        try {
+            val activeList = channels.filter { it.isConnected.get() }
+            if (activeList.isEmpty()) return
 
-        val frame = SoftEtherFrame.wrapIpv4Packet(
-            srcMac = clientMac,
-            dstMac = gatewayMac,
-            ipPacket = packet,
-            offset = 0,
-            length = length
-        )
+            val frame = SoftEtherFrame.wrapIpv4Packet(
+                srcMac = clientMac,
+                dstMac = gatewayMac,
+                ipPacket = packet,
+                offset = 0,
+                length = length
+            )
 
-        val idx = Math.abs(txChannelIndex.getAndIncrement()) % activeList.size
-        activeList[idx].sendEthernetFrame(frame)
-        txPackets.incrementAndGet()
-        totalTxBytes.addAndGet(length.toLong())
-        listener.onBytesTransferred(length.toLong(), 0)
+            val count = activeList.size
+            val startIdx = Math.abs(txChannelIndex.getAndIncrement()) % count
+            for (i in 0 until count) {
+                val ch = activeList[(startIdx + i) % count]
+                if (ch.sendEthernetFrame(frame)) {
+                    txPackets.incrementAndGet()
+                    totalTxBytes.addAndGet(length.toLong())
+                    listener.onBytesTransferred(length.toLong(), 0)
+                    return
+                }
+            }
+        } catch (_: Exception) {
+            // Channel failure or socket reset - do not crash TUN reader loop
+        }
     }
 
     private fun sendFrameBroadcast(frame: ByteArray) {
         val activeList = channels.filter { it.isConnected.get() }
-        if (activeList.isNotEmpty()) {
-            activeList[0].sendEthernetFrame(frame)
+        for (ch in activeList) {
+            if (ch.sendEthernetFrame(frame)) {
+                return
+            }
         }
     }
 
@@ -472,32 +489,35 @@ class SoftEtherClient(
     private fun ensureChannelsCount(scope: CoroutineScope, target: Int) {
         val key = sessionKey ?: return
         val currentCount = channels.count { it.isConnected.get() }
-        if (currentCount in 1 until target && isRunning.get()) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val nextId = channels.size + 1
-                    val ch = SoftEtherChannel(
-                        channelId = nextId,
-                        host = config.host,
-                        ipAddress = config.ipAddress,
-                        port = config.port,
-                        isPrimary = false,
-                        sniStrategy = config.sniStrategy,
-                        customSni = config.customSni,
-                        strictCert = config.strictCert,
-                        socketProtector = socketProtector,
-                        connectTimeoutMs = config.connectTimeoutMs
-                    )
-                    ch.connectAndHandshake(
-                        username = config.username,
-                        password = config.password,
-                        hubName = config.hubName,
-                        targetConnections = target,
-                        existingSessionKey = key
-                    )
-                    channels.add(ch)
-                    ch.readLoop { frame -> handleIncomingEthernetFrame(frame) }
-                } catch (_: Exception) {}
+        val needed = target - currentCount
+        if (needed > 0 && isRunning.get()) {
+            for (i in 0 until minOf(needed, 2)) {
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val nextId = channels.size + 1
+                        val ch = SoftEtherChannel(
+                            channelId = nextId,
+                            host = config.host,
+                            ipAddress = config.ipAddress,
+                            port = config.port,
+                            isPrimary = false,
+                            sniStrategy = config.sniStrategy,
+                            customSni = config.customSni,
+                            strictCert = config.strictCert,
+                            socketProtector = socketProtector,
+                            connectTimeoutMs = config.connectTimeoutMs
+                        )
+                        ch.connectAndHandshake(
+                            username = config.username,
+                            password = config.password,
+                            hubName = config.hubName,
+                            targetConnections = target,
+                            existingSessionKey = key
+                        )
+                        channels.add(ch)
+                        ch.readLoop { frame -> handleIncomingEthernetFrame(frame) }
+                    } catch (_: Exception) {}
+                }
             }
         }
     }
