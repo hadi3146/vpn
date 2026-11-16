@@ -1,19 +1,24 @@
 <resources>
-    <string name="app_name">Aether VPN</string>
-    <string name="quick_settings_tile_label">Aether VPN</string>
+    <string name="app_name">Radin VPN</string>
+    <string name="quick_settings_tile_label">Radin VPN</string>
     <string name="status_disconnected">Disconnected</string>
     <string name="status_connecting">Connecting…</string>
     <string name="status_authenticating">Authenticating…</string>
     <string name="status_connected">Connected</string>
+    <string name="status_reconnecting">Reconnecting…</string>
     <string name="status_disconnecting">Disconnecting…</string>
     <string name="status_error">Error</string>
 
     <string name="nav_home">Home</string>
     <string name="nav_servers">Servers</string>
     <string name="nav_dns">DNS-over-TLS</string>
+    <string name="nav_dns_tab">DNS</string>
     <string name="nav_apps">Per-App Filter</string>
+    <string name="nav_apps_tab">Apps</string>
     <string name="nav_settings">Settings</string>
     <string name="nav_logs">Logs</string>
+    <string name="view_logs_desc">Inspect and copy live SSTP, DNS, and bypass logs</string>
+    <string name="verifying_servers">Refreshing directory and verifying SSTP servers…</string>
 
     <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>
@@ -57,8 +62,97 @@
     <string name="kill_switch_title">Kill Switch</string>
     <string name="kill_switch_desc">Block network traffic if the tunnel disconnects unexpectedly.</string>
 
+    <string name="auto_failover_title">Smart Auto-Failover &amp; Stall Guard</string>
+    <string name="auto_failover_desc">Verify real internet inside tunnel, quarantine blackhole servers, and auto-switch on stalls or network changes.</string>
+
+    <string name="block_quic_title">Force HTTP/2 (Block QUIC UDP:443)</string>
+    <string name="block_quic_desc">Fail-fast UDP/443 QUIC so Telegram, Instagram, and Chrome switch cleanly to TCP TLS without stalling.</string>
+
+    <string name="bypass_iran_title">Bypass Iran Traffic (Split Routing)</string>
+    <string name="bypass_iran_desc">Route Iranian IP ranges &amp; .ir/domestic sites directly over your ISP while sending foreign traffic through VPN.</string>
+    <string name="block_ipv6_title">IPv6 Leak &amp; Hang Guard</string>
+    <string name="block_ipv6_desc">Capture carrier/Wi-Fi IPv6 and fail fast to tunneled IPv4 so censored dual-stack links cannot leak or stall apps.</string>
+    <string name="custom_bypass_title">Custom Direct Bypass Rules</string>
+    <string name="custom_bypass_desc">Domains (*.bank.com, portal.org) or IPv4 CIDRs (5.6.7.0/24) routed directly over your ISP.</string>
+    <string name="custom_bypass_hint">e.g. mycompany.com, 172.20.0.0/16</string>
+    <string name="apply_rules">Apply Rules</string>
+    <string name="learned_profiles_label">Learned per-network bypass</string>
+    <string name="reset_learned_profiles">Reset learned</string>
+    <string name="split_routing_badge">Iran Direct • Global Tunnel</string>
+    <string name="global_routing_badge">All Traffic Tunneled</string>
+    <string name="ipv6_guard_badge">IPv6 Guard</string>
+    <string name="switch_server">Switch server</string>
+    <string name="filter_all">All</string>
+    <string name="filter_europe">Europe</string>
+    <string name="filter_healthy">Healthy</string>
+    <string name="filter_favorites">Favorites</string>
+    <string name="filter_custom">Custom</string>
+    <string name="verified_badge">Verified</string>
+    <string name="cooldown_badge">Cooldown</string>
+    <string name="edit_custom_server">Edit Custom Server</string>
+    <string name="delete_server">Delete server</string>
+    <string name="cooldown_banner_format">%d servers in 20m cooldown</string>
+    <string name="reset_cooldowns">Reset</string>
+    <string name="diagnostics_title">Connection Diagnostics</string>
+    <string name="diag_physical_link">Physical Link</string>
+    <string name="diag_split_cidrs">Direct IR/LAN CIDRs</string>
+    <string name="diag_dns_cache">DNS Cache</string>
+    <string name="diag_guards">Traffic Guards</string>
+    <string name="iran_cidr_source_title">Iran IPv4 Routing Table</string>
+    <string name="iran_cidr_source_bundled">Bundled table (%d prefixes)</string>
+    <string name="iran_cidr_source_updated">Updated from RIPE (%d prefixes)</string>
+    <string name="update_iran_cidrs">Update from RIPE</string>
+    <string name="updating_iran_cidrs">Updating…</string>
+    <string name="reset_bundled_cidrs">Use Bundled</string>
+    <string name="smart_detect_scan">Smart Bypass Scan</string>
+    <string name="smart_detect_scanning">Probing filters…</string>
+    <string name="hint_trying_direct">در حال تلاش برای اتصال… لطفاً چند لحظه صبر کنید.</string>
+    <string name="hint_detecting_filter">اتصال مستقیم برقرار نشد؛ برنامه خودش دنبال راه باز کردن مسیر اینترنت است… لطفاً دکمه قطع را نزنید.</string>
+    <string name="hint_connecting_bypass">مسیر مناسب پیدا شد؛ در حال وصل کردن اینترنت شما… لطفاً صبر کنید.</string>
+    <string name="hint_racing_backups">این سرور پاسخ نداد؛ در حال پیدا کردن یک سرور سالم و سریع دیگر… لطفاً قطع نکنید.</string>
+    <string name="hint_verifying_internet">اتصال برقرار شد؛ در حال بررسی کیفیت اینترنت… تا چند ثانیه دیگر آماده است.</string>
+    <string name="hint_connecting_generic">در حال برقراری اتصال… لطفاً صبر کنید.</string>
+    <string name="filter_type_label">Detected Filter</string>
+    <string name="filter_open_no_filter">Open / No TLS Filter</string>
+    <string name="filter_sni_dpi">SNI / ClientHello DPI</string>
+    <string name="filter_deep_dpi">Deep ClientHello DPI</string>
+    <string name="filter_sni_allowlist">SNI Allowlist Filter</string>
+    <string name="filter_ip_blocked">Server IP/Port Blocked</string>
+    <string name="filter_unknown">TLS Blocked / Timeout</string>
+    <string name="dns_poisoned_badge">ISP DNS Poisoned</string>
+    <string name="recommended_bypass_label">Best Bypass</string>
+    <string name="app_version_label">Version</string>
+
     <string name="disclaimer_title">Volunteer Network Notice</string>
     <string name="disclaimer_text">VPN Gate servers are hosted by public volunteers around the world. Operators may inspect or log connection traffic according to local laws. Do not use for sensitive or confidential tasks.</string>
     <string name="disclaimer_accept">I Understand</string>
+
+    <string name="batch_ping_title">Test All Pings</string>
+    <string name="batch_pinging_format">Testing latency (%1$d/%2$d)…</string>
+    <string name="live_speed_graph_title">Live Speed</string>
+
+    <string name="sort_default">Default</string>
+    <string name="sort_ping">⚡ Ping</string>
+    <string name="sort_speed">🚀 Speed</string>
+    <string name="sort_score">🏆 Score</string>
+    <string name="sort_sessions">👥 Least Users</string>
+
+    <string name="paste_sstp_link">Import from Link (SSTP, VLESS, SS, Trojan, WG)</string>
+    <string name="paste_sstp_hint">sstp://, vless://, ss://, trojan:// or host:port</string>
+    <string name="share_server_link">Share link</string>
+    <string name="link_copied">Server configuration link copied</string>
+    <string name="invalid_sstp_link">Invalid SSTP link or address</string>
+
+    <string name="restore_default_mirrors">Restore Default Mirrors</string>
+    <string name="mirrors_restored">Default mirror sources restored.</string>
+
+    <string name="decoy_sni_title">Decoy SNI (Allowlist Bypass)</string>
+    <string name="decoy_sni_desc">Inject an approved TLS SNI header to bypass strict whitelist censorship.</string>
+
+    <string name="vpn_protocol_title">VPN Tunnel Protocol</string>
+    <string name="vpn_protocol_desc">Select tunnel protocol engine (SoftEther Multi-TCP, SSTP, or Cloudflare WARP)</string>
+    <string name="softether_connections_title">SoftEther Parallel TCP Channels</string>
+    <string name="softether_connections_desc">Bond multiple parallel TCP connections to bypass per-stream ISP throttling and maximize bandwidth</string>
+    <string name="softether_connections_format">%d parallel TCP channels</string>
 </resources>
 

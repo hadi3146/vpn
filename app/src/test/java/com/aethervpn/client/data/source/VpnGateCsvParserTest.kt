@@ -44,5 +44,36 @@ class VpnGateCsvParserTest {
         assertEquals("public-vpn-2.opengw.net", servers[1].hostName)
         assertEquals("United States", servers[1].countryLong)
     }
+
+    @Test
+    fun testExtractPortFromOpenVpnConfig() {
+        val sampleConfig = """
+            # OpenVPN Client Config
+            proto udp
+            dev tun
+            remote 192.168.1.1 1571
+            cipher AES-128-CBC
+        """.trimIndent()
+
+        val b64 = java.util.Base64.getEncoder().encodeToString(sampleConfig.toByteArray(Charsets.UTF_8))
+        val port = VpnGateCsvParser.extractPortFromOpenVpnConfig(b64)
+        assertEquals(1571, port)
+    }
+
+    @Test
+    fun testParseCsvWithDiscoveredPort() {
+        val sampleConfig = "proto tcp\nremote vpn.example.com 995\n"
+        val b64 = java.util.Base64.getEncoder().encodeToString(sampleConfig.toByteArray(Charsets.UTF_8))
+        val csv = """
+            *vpn_servers
+            #HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,Uptime,TotalUsers,TotalTraffic,LogType,Operator,Message,OpenVPN_ConfigData_Base64
+            test-vpn.opengw.net,1.2.3.4,100,50,1000,Japan,JP,10,1000,50,500,2w,Op,Msg,$b64
+            *
+        """.trimIndent()
+
+        val servers = VpnGateCsvParser.parse(ByteArrayInputStream(csv.toByteArray(Charsets.UTF_8)))
+        assertEquals(1, servers.size)
+        assertEquals(995, servers[0].customPort)
+    }
 }
 

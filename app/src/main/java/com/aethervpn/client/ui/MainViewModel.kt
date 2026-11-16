@@ -2,19 +2,27 @@ package com.aethervpn.client.ui
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.VpnService
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aethervpn.client.BuildConfig
 import com.aethervpn.client.data.datastore.DnsMode
 import com.aethervpn.client.data.datastore.PreferencesManager
 import com.aethervpn.client.data.datastore.SplitTunnelMode
 import com.aethervpn.client.data.datastore.UserSettings
+import com.aethervpn.client.data.datastore.VpnProtocol
 import com.aethervpn.client.data.model.VpnServer
 import com.aethervpn.client.data.repository.ServerRepository
+import com.aethervpn.client.data.routing.IranRoutingRules
 import com.aethervpn.client.service.AetherVpnService
 import com.aethervpn.client.service.VpnSessionState
 import com.aethervpn.client.service.VpnStateHolder
 import com.aethervpn.client.service.VpnStatus
+import com.aethervpn.client.service.WarpService
+import com.aethervpn.vpncore.transport.CensorshipDetector
+import com.aethervpn.vpncore.transport.FilterClassification
 import com.aethervpn.vpncore.transport.SniStrategy
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -22,8 +30,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.net.InetAddress
 import javax.inject.Inject
 
 @HiltViewModel
@@ -35,6 +48,7 @@ class MainViewModel @Inject constructor(
 
     val vpnState: StateFlow<VpnSessionState> = VpnStateHolder.state
     val servers: StateFlow<List<VpnServer>> = serverRepository.allServers
+        .map { list -> ServerRepository.smartSortServers(list, System.currentTimeMillis()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val settings: StateFlow<UserSettings> = preferencesManager.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UserSettings())
@@ -48,23 +62,72 @@ class MainViewModel @Inject constructor(
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
+    private val _iranCidrInfo = MutableStateFlow(IranRoutingRules.getCidrSourceInfo(context))
+    val iranCidrInfo: StateFlow<IranRoutingRules.CidrSourceInfo> = _iranCidrInfo.asStateFlow()
+
+    private val _isUpdatingCidrs = MutableStateFlow(false)
+    val isUpdatingCidrs: StateFlow<Boolean> = _isUpdatingCidrs.asStateFlow()
+
+    private val _isBatchPinging = MutableStateFlow(false)
+    val isBatchPinging: StateFlow<Boolean> = _isBatchPinging.asStateFlow()
+
+    private val _batchPingProgress = MutableStateFlow<Pair<Int, Int>?>(null)
+    val batchPingProgress: StateFlow<Pair<Int, Int>?> = _batchPingProgress.asStateFlow()
+
     val logs: StateFlow<List<String>> = VpnStateHolder.logs
 
     init {
+        val versionBanner = "Radin VPN v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+        if (VpnStateHolder.logs.value.none { it.contains(versionBanner) }) {
+            VpnStateHolder.log(versionBanner)
+        }
         viewModelScope.launch {
+            try {
+                if (preferencesManager.settingsFlow.first().vpnProtocol == VpnProtocol.WARP) {
+                    preferencesManager.updateVpnProtocol(VpnProtocol.SSTP)
+                }
+            } catch (_: Exception) {}
             serverRepository.ensureInitialized()
-            servers.collect { list ->
-                if (_selectedServer.value == null && list.isNotEmpty()) {
-                    _selectedServer.value = list.first()
+            launch {
+                servers.collect { list ->
+                    val current = _selectedServer.value
+                    val now = System.currentTimeMillis()
+                    val hasLowLatencyHealthy = list.any { ServerRepository.isLowLatencyRegion(it.countryShort) && it.cooldownUntil <= now }
+                    val needsSelection = current == null ||
+                        ServerRepository.isRestrictedAcademicSubnet(current.ip) ||
+                        ServerRepository.isCensoredCountry(current.countryShort) ||
+                        (!ServerRepository.isLowLatencyRegion(current.countryShort) && hasLowLatencyHealthy)
+                    if (needsSelection && list.isNotEmpty()) {
+                        val candidate = (if (hasLowLatencyHealthy) {
+                            list.firstOrNull {
+                                ServerRepository.isLowLatencyRegion(it.countryShort) &&
+                                    it.cooldownUntil <= now &&
+                                    !ServerRepository.isRestrictedAcademicSubnet(it.ip) &&
+                                    !ServerRepository.isCensoredCountry(it.countryShort)
+                            }
+                        } else null) ?: list.firstOrNull {
+                            !ServerRepository.isRestrictedAcademicSubnet(it.ip) &&
+                                !ServerRepository.isCensoredCountry(it.countryShort)
+                        } ?: list.first()
+                        _selectedServer.value = candidate
+                    }
                 }
             }
+            refreshServers()
         }
-        refreshServers()
     }
 
     fun selectServer(server: VpnServer) {
         _selectedServer.value = server
         VpnStateHolder.log("Selected server: ${server.countryLong.ifBlank { server.hostName }} (${server.ip}:${server.customPort})")
+        val activeStatus = vpnState.value.status
+        val isActive = activeStatus == VpnStatus.CONNECTED ||
+            activeStatus == VpnStatus.CONNECTING ||
+            activeStatus == VpnStatus.AUTHENTICATING ||
+            activeStatus == VpnStatus.RECONNECTING
+        if (isActive && vpnState.value.currentServer?.hostName != server.hostName && VpnService.prepare(context) == null) {
+            connect(server)
+        }
     }
 
     fun setSearchQuery(query: String) {
@@ -72,16 +135,43 @@ class MainViewModel @Inject constructor(
     }
 
     fun refreshServers() {
+        if (_isRefreshing.value) return
         viewModelScope.launch {
             _isRefreshing.value = true
-            val currentSettings = settings.value
-            serverRepository.refreshServers(currentSettings.mirrorUrls)
-            _isRefreshing.value = false
+            try {
+                val currentSettings = preferencesManager.settingsFlow.first()
+                serverRepository.refreshServers(currentSettings.mirrorUrls)
+            } finally {
+                _isRefreshing.value = false
+            }
         }
     }
 
     fun connectSelectedServer() {
-        val server = _selectedServer.value ?: servers.value.firstOrNull()
+        if (settings.value.vpnProtocol == VpnProtocol.WARP) {
+            connectWarp()
+            return
+        }
+        var server = _selectedServer.value
+        val now = System.currentTimeMillis()
+        val hasLowLatencyHealthy = servers.value.any { ServerRepository.isLowLatencyRegion(it.countryShort) && it.cooldownUntil <= now }
+        if (server == null ||
+            ServerRepository.isRestrictedAcademicSubnet(server.ip) ||
+            ServerRepository.isCensoredCountry(server.countryShort) ||
+            (!ServerRepository.isLowLatencyRegion(server.countryShort) && hasLowLatencyHealthy)
+        ) {
+            server = (if (hasLowLatencyHealthy) {
+                servers.value.firstOrNull {
+                    ServerRepository.isLowLatencyRegion(it.countryShort) &&
+                        it.cooldownUntil <= now &&
+                        !ServerRepository.isRestrictedAcademicSubnet(it.ip) &&
+                        !ServerRepository.isCensoredCountry(it.countryShort)
+                }
+            } else null) ?: servers.value.firstOrNull {
+                !ServerRepository.isRestrictedAcademicSubnet(it.ip) &&
+                    !ServerRepository.isCensoredCountry(it.countryShort)
+            } ?: servers.value.firstOrNull()
+        }
         if (server == null) {
             addLog("No server selected. Initializing server list...")
             viewModelScope.launch {
@@ -92,14 +182,33 @@ class MainViewModel @Inject constructor(
         connect(server)
     }
 
+    fun connectWarp() {
+        val sstpIntent = Intent(context, AetherVpnService::class.java).apply {
+            action = AetherVpnService.ACTION_DISCONNECT
+        }
+        try { context.startService(sstpIntent) } catch (_: Exception) {}
+
+        val warpIntent = WarpService.buildConnectIntent(context)
+        try {
+            ContextCompat.startForegroundService(context, warpIntent)
+            addLog("Starting Cloudflare WARP with clean IP scanner...")
+        } catch (e: Exception) {
+            addLog("Failed to start WARP service: ${e.message}")
+        }
+    }
+
     fun quickConnect() {
-        val best = servers.value.maxByOrNull { it.score } ?: servers.value.firstOrNull()
-        if (best != null) {
-            _selectedServer.value = best
-            connect(best)
-        } else {
-            addLog("No server available for Quick Connect. Prepopulating...")
-            viewModelScope.launch {
+        if (settings.value.vpnProtocol == VpnProtocol.WARP) {
+            connectWarp()
+            return
+        }
+        viewModelScope.launch {
+            val best = serverRepository.getBestServer()
+            if (best != null) {
+                _selectedServer.value = best
+                connect(best)
+            } else {
+                addLog("No server available for Quick Connect. Prepopulating...")
                 serverRepository.ensureInitialized()
             }
         }
@@ -107,15 +216,10 @@ class MainViewModel @Inject constructor(
 
     private fun connect(server: VpnServer) {
         _selectedServer.value = server
-        val intent = Intent(context, AetherVpnService::class.java).apply {
-            action = AetherVpnService.ACTION_CONNECT
-            putExtra(AetherVpnService.EXTRA_SERVER_HOST, server.hostName)
-            putExtra(AetherVpnService.EXTRA_SERVER_IP, server.ip)
-            putExtra(AetherVpnService.EXTRA_SERVER_PORT, server.customPort)
-            putExtra(AetherVpnService.EXTRA_SERVER_USER, server.customUsername)
-            putExtra(AetherVpnService.EXTRA_SERVER_PASS, server.customPassword)
-            putExtra(AetherVpnService.EXTRA_SERVER_COUNTRY, server.countryLong)
-        }
+        val warpIntent = WarpService.buildDisconnectIntent(context)
+        try { context.startService(warpIntent) } catch (_: Exception) {}
+
+        val intent = AetherVpnService.buildConnectIntent(context, server)
         try {
             ContextCompat.startForegroundService(context, intent)
             addLog("Connecting to ${server.countryLong.ifBlank { server.hostName }} (${server.ip}:${server.customPort})...")
@@ -124,14 +228,69 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun disconnect() {
-        val intent = Intent(context, AetherVpnService::class.java).apply {
-            action = AetherVpnService.ACTION_DISCONNECT
+    fun switchToAnotherServer() {
+        if (settings.value.vpnProtocol == VpnProtocol.WARP) {
+            rescanWarpCleanIp()
+            return
+        }
+        viewModelScope.launch {
+            if (VpnService.prepare(context) != null) return@launch
+            val current = vpnState.value.currentServer ?: _selectedServer.value
+            val excluded = buildSet {
+                current?.hostName?.takeIf { it.isNotBlank() }?.let { add(it) }
+                current?.ip?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+            val next = serverRepository.getBestServer(excludeHosts = excluded)
+            if (next != null) {
+                addLog("Switching to next healthy server: ${next.countryLong.ifBlank { next.hostName }} (${next.ip})")
+                connect(next)
+            } else {
+                addLog("No alternative server available right now.")
+            }
+        }
+    }
+
+    fun rescanWarpCleanIp() {
+        val intent = Intent(context, WarpService::class.java).apply {
+            action = WarpService.ACTION_RESCAN
         }
         try {
             ContextCompat.startForegroundService(context, intent)
+            addLog("Rescanning for fresh Cloudflare Clean IP...")
+        } catch (e: Exception) {
+            addLog("Failed to rescan WARP: ${e.message}")
+        }
+    }
+
+    fun setVpnProtocol(protocol: VpnProtocol) {
+        viewModelScope.launch {
+            preferencesManager.updateVpnProtocol(protocol)
+            addLog("Selected protocol: ${protocol.displayName}")
+        }
+    }
+
+    fun updateSoftEtherConnections(count: Int) {
+        viewModelScope.launch {
+            preferencesManager.updateSoftEtherConnections(count)
+            addLog("SoftEther parallel connections set to: $count")
+        }
+    }
+
+    fun disconnect() {
+        val sstpIntent = Intent(context, AetherVpnService::class.java).apply {
+            action = AetherVpnService.ACTION_DISCONNECT
+        }
+        try {
+            context.startService(sstpIntent)
         } catch (_: Exception) {
-            context.stopService(intent)
+            context.stopService(sstpIntent)
+        }
+
+        val warpIntent = WarpService.buildDisconnectIntent(context)
+        try {
+            context.startService(warpIntent)
+        } catch (_: Exception) {
+            context.stopService(warpIntent)
         }
         addLog("Disconnected by user.")
     }
@@ -142,9 +301,13 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun addCustomServer(server: VpnServer) {
+    fun saveCustomServer(server: VpnServer, previousHostName: String? = null) {
         viewModelScope.launch {
-            serverRepository.addCustomServer(server)
+            serverRepository.saveCustomServer(server, previousHostName)
+            val prevKey = previousHostName ?: server.hostName
+            if (_selectedServer.value?.hostName == prevKey) {
+                _selectedServer.value = server
+            }
         }
     }
 
@@ -154,9 +317,59 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun clearServerCooldowns() {
+        viewModelScope.launch {
+            serverRepository.clearServerCooldowns()
+            addLog("Cleared temporary server cooldowns.")
+        }
+    }
+
+    fun refreshIranCidrs() {
+        if (_isUpdatingCidrs.value) return
+        viewModelScope.launch {
+            _isUpdatingCidrs.value = true
+            try {
+                val res = serverRepository.refreshIranCidrs()
+                _iranCidrInfo.value = IranRoutingRules.getCidrSourceInfo(context)
+                if (res.isSuccess) {
+                    reconnectIfActive()
+                }
+            } finally {
+                _isUpdatingCidrs.value = false
+            }
+        }
+    }
+
+    fun resetIranCidrsToBundled() {
+        viewModelScope.launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                IranRoutingRules.resetIranCidrsToBundled(context)
+            }
+            _iranCidrInfo.value = IranRoutingRules.getCidrSourceInfo(context)
+            addLog("Restored bundled Iran CIDR table (${_iranCidrInfo.value.count} prefixes).")
+            reconnectIfActive()
+        }
+    }
+
     fun testServerPing(server: VpnServer) {
         viewModelScope.launch {
             serverRepository.testServerPing(server)
+        }
+    }
+
+    fun testBatchPings(maxServers: Int = 20) {
+        if (_isBatchPinging.value) return
+        viewModelScope.launch {
+            _isBatchPinging.value = true
+            _batchPingProgress.value = Pair(0, maxServers)
+            try {
+                serverRepository.testBatchPings(maxServers) { current, total ->
+                    _batchPingProgress.value = Pair(current, total)
+                }
+            } finally {
+                _isBatchPinging.value = false
+                _batchPingProgress.value = null
+            }
         }
     }
 
@@ -192,6 +405,125 @@ class MainViewModel @Inject constructor(
         preferencesManager.updateKillSwitch(enabled)
     }
 
+    fun updateAutoFailover(enabled: Boolean) = viewModelScope.launch {
+        preferencesManager.updateAutoFailover(enabled)
+    }
+
+    fun updateBlockQuic(enabled: Boolean) = viewModelScope.launch {
+        preferencesManager.updateBlockQuic(enabled)
+        reconnectIfActive()
+    }
+
+    fun updateBypassIran(enabled: Boolean) = viewModelScope.launch {
+        preferencesManager.updateBypassIran(enabled)
+        reconnectIfActive()
+    }
+
+    fun updateBlockIpv6(enabled: Boolean) = viewModelScope.launch {
+        preferencesManager.updateBlockIpv6(enabled)
+        reconnectIfActive()
+    }
+
+    fun updateCustomBypassRules(rules: String) = viewModelScope.launch {
+        preferencesManager.updateCustomBypassRules(rules)
+        addLog("Updated custom bypass rules.")
+        reconnectIfActive()
+    }
+
+    fun clearLearnedBypassProfiles() = viewModelScope.launch {
+        preferencesManager.clearLearnedBypassProfiles()
+        addLog("Cleared learned per-network SNI bypass profiles.")
+    }
+
+    fun runSmartBypassScan() {
+        val currentStatus = vpnState.value.status
+        if (vpnState.value.isScanningBypass) return
+        if (currentStatus != VpnStatus.DISCONNECTED && currentStatus != VpnStatus.ERROR) {
+            addLog("Disconnect VPN first to scan raw ISP filtering behavior.")
+            return
+        }
+
+        viewModelScope.launch {
+            VpnStateHolder.updateScanningBypass(true)
+            try {
+                val currentSettings = preferencesManager.settingsFlow.first()
+                val target = _selectedServer.value
+                    ?: serverRepository.getBestServer()
+                    ?: servers.value.firstOrNull()
+                if (target == null) {
+                    addLog("No server available for smart bypass scan.")
+                    return@launch
+                }
+
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val profileKey = VpnStateHolder.resolveNetworkProfileKey(cm)
+                val preferred = currentSettings.vpnBypassProfiles[profileKey]
+                    ?.let { key -> SniStrategy.entries.firstOrNull { it.name == key && it.isConcreteTransport } }
+                val customSniOverride = target.customSni?.takeIf { it.isNotBlank() }
+                    ?: currentSettings.customSni.takeIf { it.isNotBlank() }
+
+                val diagnosis = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val inetAddr = InetAddress.getByName(target.ip)
+                    val dnsPoisoned = probeSystemDnsPoisoning()
+                    CensorshipDetector.detectBestStrategy(
+                        host = target.hostName,
+                        ipAddress = inetAddr,
+                        port = target.customPort,
+                        networkProfile = profileKey,
+                        preferredStrategy = preferred,
+                        customSni = customSniOverride,
+                        strictCert = currentSettings.strictCert,
+                        stopOnFirstWinner = false,
+                        dnsPoisoningDetected = dnsPoisoned
+                    )
+                }
+
+                VpnStateHolder.updateDiagnosis(diagnosis)
+                val winner = diagnosis.recommendedStrategy
+                if (winner != null) {
+                    preferencesManager.updateVpnBypassProfile(profileKey, winner.name)
+                    addLog(
+                        "Smart Scan [$profileKey] ${target.ip}: ${diagnosis.classification.summaryKey} -> " +
+                            "winner ${winner.displayName} (DNS poisoned=${diagnosis.dnsPoisoningDetected == true})"
+                    )
+                } else {
+                    addLog(
+                        "Smart Scan [$profileKey] ${target.ip}: ${diagnosis.classification.summaryKey} (no bypass succeeded on this server)"
+                    )
+                }
+            } catch (e: Exception) {
+                addLog("Smart bypass scan error: ${e.message}")
+            } finally {
+                VpnStateHolder.updateScanningBypass(false)
+            }
+        }
+    }
+
+    private suspend fun probeSystemDnsPoisoning(): Boolean {
+        return withTimeoutOrNull(1800L) {
+            try {
+                val addrs = InetAddress.getAllByName("telegram.org")
+                addrs.isEmpty() || addrs.any { addr ->
+                    addr.isSiteLocalAddress || addr.isLoopbackAddress || addr.isAnyLocalAddress
+                }
+            } catch (_: Exception) {
+                true
+            }
+        } ?: true
+    }
+
+    private fun reconnectIfActive() {
+        val status = vpnState.value.status
+        val isActive = status == VpnStatus.CONNECTED ||
+            status == VpnStatus.CONNECTING ||
+            status == VpnStatus.AUTHENTICATING ||
+            status == VpnStatus.RECONNECTING
+        if (!isActive || VpnService.prepare(context) != null) return
+        val target = vpnState.value.currentServer ?: _selectedServer.value ?: return
+        VpnStateHolder.log("Settings changed; re-applying tunnel configuration...")
+        connect(target)
+    }
+
     fun updateSplitTunnelMode(mode: SplitTunnelMode) = viewModelScope.launch {
         preferencesManager.updateSplitTunnelMode(mode)
     }
@@ -206,6 +538,11 @@ class MainViewModel @Inject constructor(
 
     fun updateMirrorUrls(urls: String) = viewModelScope.launch {
         preferencesManager.updateMirrorUrls(urls)
+    }
+
+    fun resetMirrorUrlsToDefault() = viewModelScope.launch {
+        preferencesManager.resetMirrorUrlsToDefault()
+        addLog("Restored default censorship-resistant mirrors.")
     }
 
     fun updateLanguage(lang: String) = viewModelScope.launch {

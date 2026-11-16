@@ -11,21 +11,30 @@ object MssClamper {
      * and updates the TCP checksum.
      */
     fun clampMss(packet: ByteArray, length: Int, maxMss: Int) {
-        if (length < 40) return
-        val versionAndIhl = packet[0].toInt() and 0xFF
+        clampMss(packet, 0, length, maxMss)
+    }
+
+    /**
+     * Checks if the given IPv4 packet is a TCP SYN packet.
+     * If so, and if MSS option is present and > maxMss, clamps it down to maxMss
+     * and updates the TCP checksum.
+     */
+    fun clampMss(packet: ByteArray, offset: Int, length: Int, maxMss: Int) {
+        if (length < 40 || packet.size < offset + length) return
+        val versionAndIhl = packet[offset].toInt() and 0xFF
         if ((versionAndIhl ushr 4) != 4) return // Not IPv4
         val ihl = (versionAndIhl and 0x0F) * 4
         if (length < ihl + 20) return
-        val protocol = packet[9].toInt() and 0xFF
+        val protocol = packet[offset + 9].toInt() and 0xFF
         if (protocol != 6) return // Not TCP
 
-        val tcpOffset = ihl
+        val tcpOffset = offset + ihl
         val flags = packet[tcpOffset + 13].toInt() and 0xFF
         val isSyn = (flags and 0x02) != 0
-        if (!isSyn) return
+        if (!isSyn) return // Fast exit: Non-SYN packet, no MSS clamping needed
 
         val dataOffset = ((packet[tcpOffset + 12].toInt() and 0xF0) ushr 4) * 4
-        if (dataOffset <= 20 || length < tcpOffset + dataOffset) return
+        if (dataOffset <= 20 || length < ihl + dataOffset) return
 
         // Scan TCP options for MSS (kind = 2, length = 4)
         var optIdx = tcpOffset + 20

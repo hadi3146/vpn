@@ -34,7 +34,10 @@ object AppModule {
             context,
             AppDatabase::class.java,
             "aether_vpn.db"
-        ).fallbackToDestructiveMigration().build()
+        )
+        .addMigrations(AppDatabase.MIGRATION_2_3)
+        .fallbackToDestructiveMigration()
+        .build()
     }
 
     @Provides

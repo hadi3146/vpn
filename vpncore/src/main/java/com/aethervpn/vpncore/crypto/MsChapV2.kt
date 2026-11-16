@@ -20,7 +20,7 @@ object MsChapV2 {
         .toByteArray(StandardCharsets.US_ASCII)
 
     private val SHA_PAD_1 = ByteArray(40) { 0x00.toByte() }
-    private val SHA_PAD_2 = ByteArray(40) { 0xF0.toByte() }
+    private val SHA_PAD_2 = ByteArray(40) { 0xF2.toByte() }
 
     fun generatePeerChallenge(): ByteArray {
         val challenge = ByteArray(16)

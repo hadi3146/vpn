@@ -36,12 +36,10 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
+    api("com.wireguard.android:tunnel:1.0.20230706")
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
-}
-
-tasks.matching { it.name.startsWith("extract") && it.name.endsWith("Annotations") }.configureEach {
-    enabled = false
 }
 

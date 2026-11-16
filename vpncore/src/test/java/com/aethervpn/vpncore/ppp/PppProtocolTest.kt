@@ -40,6 +40,26 @@ class PppProtocolTest {
     }
 
     @Test
+    fun testLcpEchoRequestReply() {
+        val echoData = byteArrayOf(0, 0, 0, 0, 1, 2, 3, 4)
+        val echoReq = LcpPacket(LcpPacket.CODE_ECHO_REQUEST, 7, rawData = echoData)
+        val encoded = echoReq.encode()
+        val decoded = LcpPacket.decode(encoded)
+
+        assertEquals(LcpPacket.CODE_ECHO_REQUEST, decoded.code)
+        assertEquals(7.toByte(), decoded.identifier)
+        assertArrayEquals(echoData, decoded.rawData)
+
+        val echoReply = LcpPacket(LcpPacket.CODE_ECHO_REPLY, decoded.identifier, rawData = decoded.rawData)
+        val replyEncoded = echoReply.encode()
+        val replyDecoded = LcpPacket.decode(replyEncoded)
+
+        assertEquals(LcpPacket.CODE_ECHO_REPLY, replyDecoded.code)
+        assertEquals(7.toByte(), replyDecoded.identifier)
+        assertArrayEquals(echoData, replyDecoded.rawData)
+    }
+
+    @Test
     fun testIpcpPacketEncodeDecode() {
         val ipBytes = byteArrayOf(10, 0, 0, 2)
         val dnsBytes = byteArrayOf(8, 8, 8, 8)
@@ -72,4 +92,3 @@ class PppProtocolTest {
         assertArrayEquals(challenge, decoded.data)
     }
 }
-

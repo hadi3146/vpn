@@ -95,6 +95,7 @@ fun PerAppFilterScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(title = { Text(stringResource(R.string.split_tunnel_title)) })
         }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Card
@@ -38,20 +39,29 @@ import com.aethervpn.client.R
 @Composable
 fun LogsScreen(
     logs: List<String>,
-    onClearLogs: () -> Unit
+    onClearLogs: () -> Unit,
+    onNavigateBack: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.nav_logs)) },
+                navigationIcon = {
+                    if (onNavigateBack != null) {
+                        IconButton(onClick = onNavigateBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
                 actions = {
                     IconButton(
                         onClick = {
                             val fullLog = logs.reversed().joinToString("\n")
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Aether VPN Logs", fullLog))
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Radin VPN Logs", fullLog))
                             Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
                         }
                     ) {

@@ -1,9 +1,20 @@
 package com.aethervpn.client.data.model
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "vpn_servers")
+@Entity(
+    tableName = "vpn_servers",
+    indices = [
+        Index(value = ["isFavorite"]),
+        Index(value = ["score"]),
+        Index(value = ["ping"]),
+        Index(value = ["isCustom"]),
+        Index(value = ["countryShort"]),
+        Index(value = ["cooldownUntil"])
+    ]
+)
 data class VpnServer(
     @PrimaryKey
     val hostName: String,
@@ -26,6 +37,10 @@ data class VpnServer(
     val customPort: Int = 443,
     val customUsername: String = "vpn",
     val customPassword: String = "vpn",
-    val customSni: String? = null
+    val customSni: String? = null,
+    val successCount: Int = 0,
+    val failureCount: Int = 0,
+    val cooldownUntil: Long = 0L,
+    val lastVerifiedAt: Long = 0L
 )
 

@@ -1,8 +1,14 @@
 package com.aethervpn.vpncore.dns
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.IOException
+import java.io.InputStream
 
 class DnsOverTlsClientTest {
 
@@ -39,6 +45,54 @@ class DnsOverTlsClientTest {
         )
         assertNotNull(exampleQuery)
         assertEquals(29, exampleQuery.size)
+        val built = com.aethervpn.vpncore.tun.TunnelPackets.buildDnsARecordQuery("example.com", 0x1234)
+        org.junit.Assert.assertArrayEquals(exampleQuery, built)
+    }
+
+    @Test
+    fun testDohDefaultEndpointsIncludeMajorResolvers() {
+        val ips = DnsOverHttpsClient.DEFAULT_ENDPOINTS.map { it.ip }.toSet()
+        assertTrue(ips.contains("1.1.1.1"))
+        assertTrue(ips.contains("8.8.8.8"))
+        assertTrue(ips.contains("9.9.9.9"))
+    }
+
+    @Test
+    fun testDohChunkedResponseStopsImmediatelyWithoutEof() {
+        val fakeDns = ByteArray(14) { (it + 1).toByte() }
+        val chunkHex = fakeDns.size.toString(16)
+        val headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n$chunkHex\r\n".toByteArray(Charsets.US_ASCII)
+        val trailer = "\r\n0\r\n\r\n".toByteArray(Charsets.US_ASCII)
+        val streamBytes = headers + fakeDns + trailer
+        var eofRequestedAfterChunk = false
+        val stallingStream = object : InputStream() {
+            private var pos = 0
+            override fun read(): Int = if (pos < streamBytes.size) streamBytes[pos++].toInt() and 0xFF else -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (pos >= streamBytes.size) {
+                    eofRequestedAfterChunk = true
+                    throw AssertionError("Should stop once chunked zero-terminator is read without blocking for EOF")
+                }
+                val count = minOf(len, streamBytes.size - pos)
+                System.arraycopy(streamBytes, pos, b, off, count)
+                pos += count
+                return count
+            }
+        }
+
+        val decoded = DnsOverHttpsClient().readHttpBody(stallingStream)
+        assertNotNull(decoded)
+        assertArrayEquals(fakeDns, decoded)
+        assertTrue(!eofRequestedAfterChunk)
+    }
+
+    @Test
+    fun testDohNon2xxStatusThrowsDescriptiveError() {
+        val response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".toByteArray(Charsets.US_ASCII)
+        val err = assertThrows(IOException::class.java) {
+            DnsOverHttpsClient().readHttpBody(ByteArrayInputStream(response))
+        }
+        assertTrue(err.message?.contains("403") == true)
     }
 }
 

@@ -61,6 +61,8 @@ object VpnGateCsvParser {
                 val logType = map["logtype"] ?: ""
                 val operator = map["operator"] ?: ""
                 val message = map["message"] ?: ""
+                val openvpnB64 = map["openvpn_configdata_base64"] ?: ""
+                val discoveredPort = extractPortFromOpenVpnConfig(openvpnB64) ?: 443
 
                 servers.add(
                     VpnServer(
@@ -79,7 +81,8 @@ object VpnGateCsvParser {
                         operator = operator,
                         message = message,
                         sstpSupported = true,
-                        isCustom = false
+                        isCustom = false,
+                        customPort = discoveredPort
                     )
                 )
             } catch (_: Exception) {
@@ -119,6 +122,43 @@ object VpnGateCsvParser {
         }
         tokens.add(sb.toString().trim())
         return tokens
+    }
+
+    /**
+     * Extracts the port number from base64-encoded OpenVPN config if present in `remote <host> <port>`.
+     */
+    fun extractPortFromOpenVpnConfig(base64Config: String): Int? {
+        if (base64Config.isBlank()) return null
+        val bytes = decodeBase64Safe(base64Config) ?: return null
+        val configText = String(bytes, Charsets.UTF_8)
+        val regex = Regex("""(?m)^\s*remote\s+\S+\s+(\d+)""", RegexOption.IGNORE_CASE)
+        val match = regex.find(configText)
+        val port = match?.groupValues?.get(1)?.toIntOrNull()
+        return if (port != null && port in 1..65535) port else null
+    }
+
+    /**
+     * Safely decodes base64 strings across Android versions (API 24+) and JVM test runners.
+     */
+    fun decodeBase64Safe(input: String): ByteArray? {
+        if (input.isBlank()) return null
+        // 1. Try standard java.util.Base64 MIME decoder (standard on JVM and Android API 26+)
+        try {
+            return java.util.Base64.getMimeDecoder().decode(input)
+        } catch (_: Throwable) {
+            // Fall through
+        }
+
+        // 2. Fallback via reflection to android.util.Base64 for Android API 24/25 devices
+        try {
+            val clazz = Class.forName("android.util.Base64")
+            val method = clazz.getMethod("decode", String::class.java, Int::class.javaPrimitiveType)
+            return method.invoke(null, input, 0) as? ByteArray
+        } catch (_: Throwable) {
+            // Fall through
+        }
+
+        return null
     }
 }
 

@@ -122,8 +122,8 @@ data class SstpAttribute(
         const val ATTRIB_NO_ERROR: Byte = 0x00
         const val ATTRIB_ENCAPSULATED_PROTOCOL_ID: Byte = 0x01
         const val ATTRIB_STATUS_INFO: Byte = 0x02
-        const val ATTRIB_CRYPTO_BINDING: Byte = 0x04
-        const val ATTRIB_CRYPTO_BINDING_REQ: Byte = 0x08
+        const val ATTRIB_CRYPTO_BINDING: Byte = 0x03
+        const val ATTRIB_CRYPTO_BINDING_REQ: Byte = 0x04
 
         fun encapsulatedPpp(): SstpAttribute {
             // Protocol ID 0x0001 = PPP

@@ -15,7 +15,15 @@ interface VpnServerDao {
     @Query("SELECT COUNT(*) FROM vpn_servers")
     suspend fun getServerCount(): Int
 
-    @Query("SELECT * FROM vpn_servers ORDER BY isFavorite DESC, score DESC, ping ASC")
+    @Query("""
+        SELECT * FROM vpn_servers 
+        ORDER BY 
+            isFavorite DESC, 
+            CASE WHEN ip LIKE '219.100.37.%' THEN 1 ELSE 0 END ASC,
+            CASE WHEN countryShort IN ('RU', 'IR', 'CN', 'BY', 'SY', 'CU', 'KP') THEN 1 ELSE 0 END ASC,
+            score DESC, 
+            ping ASC
+    """)
     fun getAllServers(): Flow<List<VpnServer>>
 
     @Query("SELECT * FROM vpn_servers WHERE isFavorite = 1 ORDER BY score DESC")
@@ -41,6 +49,18 @@ interface VpnServerDao {
 
     @Query("UPDATE vpn_servers SET ping = :ping WHERE hostName = :hostName")
     suspend fun updatePing(hostName: String, ping: Int)
+
+    @Query("UPDATE vpn_servers SET customPort = :port WHERE hostName = :hostName")
+    suspend fun updatePort(hostName: String, port: Int)
+
+    @Query("UPDATE vpn_servers SET successCount = successCount + 1, failureCount = 0, cooldownUntil = 0, lastVerifiedAt = :now WHERE hostName = :hostName")
+    suspend fun recordSuccess(hostName: String, now: Long)
+
+    @Query("UPDATE vpn_servers SET failureCount = failureCount + 1, cooldownUntil = :cooldownUntil WHERE hostName = :hostName")
+    suspend fun recordFailure(hostName: String, cooldownUntil: Long)
+
+    @Query("UPDATE vpn_servers SET cooldownUntil = 0, failureCount = 0")
+    suspend fun clearCooldowns()
 
     @Query("DELETE FROM vpn_servers WHERE isCustom = 0")
     suspend fun clearVpnGateServers()

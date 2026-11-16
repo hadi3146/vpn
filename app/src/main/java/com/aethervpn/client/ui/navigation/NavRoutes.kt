@@ -12,8 +12,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 sealed class Screen(val route: String, val titleResId: Int, val icon: ImageVector) {
     data object Home : Screen("home", com.aethervpn.client.R.string.nav_home, Icons.Default.Home)
     data object Servers : Screen("servers", com.aethervpn.client.R.string.nav_servers, Icons.Default.Public)
-    data object Dns : Screen("dns", com.aethervpn.client.R.string.nav_dns, Icons.Default.Dns)
-    data object PerApp : Screen("per_app", com.aethervpn.client.R.string.nav_apps, Icons.Default.Apps)
+    data object Dns : Screen("dns", com.aethervpn.client.R.string.nav_dns_tab, Icons.Default.Dns)
+    data object PerApp : Screen("per_app", com.aethervpn.client.R.string.nav_apps_tab, Icons.Default.Apps)
     data object Settings : Screen("settings", com.aethervpn.client.R.string.nav_settings, Icons.Default.Settings)
     data object Logs : Screen("logs", com.aethervpn.client.R.string.nav_logs, Icons.AutoMirrored.Filled.List)
 }
@@ -23,7 +23,6 @@ val BottomNavScreens = listOf(
     Screen.Servers,
     Screen.Dns,
     Screen.PerApp,
-    Screen.Settings,
-    Screen.Logs
+    Screen.Settings
 )
 

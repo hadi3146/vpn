@@ -1,21 +1,25 @@
-# Aether VPN Protocol Notes: SSTP, PPP, SNI Bypass & DoT
+# Radin VPN (`رادین وی‌پی‌ان`) — Protocol Engineering & Technical Notes
 
-## 1. MS-SSTP Architecture & Handshake
+This document provides in-depth protocol specifications, wire formats, timing constraints, and censorship evasion mechanics implemented in `:vpncore`.
 
-MS-SSTP (Secure Socket Tunneling Protocol) encapsulates PPP frames over a TLS connection (typically port 443).
+---
+
+## 1. MS-SSTP Architecture & Handshake Flow
+
+MS-SSTP (Secure Socket Tunneling Protocol v1.0, `[MS-SSTP]`) encapsulates PPP frames over an encrypted TLS channel (typically TCP port 443).
 
 ### Step 1: HTTP Duplex Post Handshake
-The client issues an HTTP POST request with method `SSTP_DUPLEX_POST`:
+The client issues an HTTP POST request using the non-standard method `SSTP_DUPLEX_POST`:
 ```http
 SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\n
 SSTPCORRELATIONID: {<UUID>}\r\n
 Content-Length: 18446744073709551615\r\n
-Host: <hostname>\r\n
+Host: <hostname-or-ip>\r\n
 \r\n
 ```
-The server answers with `HTTP/1.1 200 OK`. Immediately following the HTTP header separator (`\r\n\r\n`), both endpoints transition to raw SSTP binary packet framing.
+The server answers with `HTTP/1.1 200 OK`. Immediately following the CRLFCRLF (`\r\n\r\n`) header delimiter, both endpoints switch from HTTP formatting to raw binary SSTP packet framing.
 
-### Step 2: SSTP Packet Structure
+### Step 2: SSTP Binary Packet Structure
 ```
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -25,64 +29,115 @@ The server answers with `HTTP/1.1 200 OK`. Immediately following the HTTP header
 |       Message Type            |       Num Attributes          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
-- **Version**: `0x10` (SSTP v1.0).
-- **Control Flag (C)**: `0x01` for Control packets, `0x00` for Data packets.
-- **Length**: 12-bit integer indicating total packet size (including 4-byte header).
-- **Data Packets**: Direct encapsulation of higher-layer PPP packets without message type or attributes.
+- **Version (8 bits)**: `0x10` (SSTP v1.0).
+- **Reserved (7 bits)**: Must be zero.
+- **Control Flag (C, 1 bit)**: `0x01` for Control packets, `0x00` for Data packets.
+- **Length (12 bits)**: Total length of the packet in bytes, including the 4-byte header.
+- **Data Packets (`C = 0`)**: Encapsulate higher-layer PPP frames directly without Message Type or Attribute headers.
+- **Control Packets (`C = 1`)**: Carry SSTP signaling messages:
+  - `0x0001`: `SSTP_MSG_CALL_CONNECT_REQUEST`
+  - `0x0002`: `SSTP_MSG_CALL_CONNECT_ACK`
+  - `0x0003`: `SSTP_MSG_CALL_CONNECT_NAK`
+  - `0x0004`: `SSTP_MSG_CALL_CONNECTED`
+  - `0x0005`: `SSTP_MSG_CALL_DISCONNECT`
+  - `0x0006`: `SSTP_MSG_CALL_DISCONNECT_ACK`
+  - `0x0007`: `SSTP_MSG_ECHO_REQUEST`
+  - `0x0008`: `SSTP_MSG_ECHO_RESPONSE`
 
-### Step 3: Crypto Binding & Compound MAC
-To protect against Man-in-the-Middle (MitM) attacks where an attacker terminates the TLS connection independently of the PPP credentials, SSTP enforces Crypto Binding:
-1. Server supplies a 32-byte `Nonce` in `SSTP_MSG_CALL_CONNECT_ACK`.
-2. Client hashes server's leaf X.509 certificate using SHA-256 and SHA-1.
-3. Client derives Compound MAC Key (CMK) from the MS-CHAPv2 Master Key:
-   `CMK = HMAC_SHA256(MasterKey, "SSTP inner method key derivation")`
-4. Client forms `SSTP_MSG_CALL_CONNECTED` packet with 104-byte Crypto Binding attribute:
-   - Attribute Header (4 bytes)
-   - Hash Protocol Bitmask (1 byte: `0x02` for SHA-256)
-   - Nonce (32 bytes)
-   - Compound MAC placeholder (32 bytes of `0x00`)
+---
+
+## 2. Crypto Binding & Compound MAC Protection
+
+SSTP incorporates Crypto Binding to protect against Man-in-the-Middle (MitM) attacks where an attacker terminates the outer TLS tunnel independently of the inner PPP credentials.
+
+### Protocol Verification Sequence
+1. Server supplies a 32-byte pseudo-random `Nonce` in `SSTP_MSG_CALL_CONNECT_ACK`, along with `HashProtocolMask` (`0x02` for SHA-256).
+2. Client hashes the server's leaf X.509 certificate using SHA-256:
+   $$\text{CertHash} = \text{SHA256}(\text{ServerCertificateDer})$$
+3. Client derives the Compound MAC Key (CMK) from the 32-byte MS-CHAPv2 Master Key generated during phase 2:
+   $$\text{CMK} = \text{HMAC\_SHA256}(\text{MasterKey}, \text{"SSTP inner method key derivation"})$$
+4. Client constructs the `SSTP_MSG_CALL_CONNECTED` packet containing a 104-byte Crypto Binding attribute:
+   - Attribute Header (4 bytes: Attribute ID `0x03`, Length `108`)
+   - Reserved + Hash Protocol (4 bytes: `0x02` for SHA-256)
+   - Nonce (32 bytes from server ACK)
+   - Compound MAC placeholder (32 bytes of zeros)
    - Certificate Hash (32 bytes)
-5. Client computes `HMAC_SHA256(CMK, CallConnectedPacket)` and writes the 32-byte digest into the Compound MAC placeholder.
+5. Client computes:
+   $$\text{CompoundMac} = \text{HMAC\_SHA256}(\text{CMK}, \text{CallConnectedPacketBytes})$$
+6. Client overwrites the 32-byte zero placeholder with the resulting Compound MAC digest and transmits the packet.
+7. SoftEther's SSTP handler (`Proto_SSTP.c` line 253) verifies the packet format and transitions from `SSTP_SERVER_STATUS_CONNECTED_PENDING` to `SSTP_SERVER_STATUS_ESTABLISHED`.
 
 ---
 
-## 2. PPP State Machine
+## 3. PPP State Machine & Timing Constraints
 
-1. **LCP (Link Control Protocol - 0xC021)**:
-   - Client sends `Configure-Request` with MRU (1400) and Magic Number.
-   - Server responds with `Configure-Request` negotiating `MS-CHAPv2` (`0xC223`, algorithm `0x81`).
-   - Mutual `Configure-Ack` confirms options.
-2. **Authentication (MS-CHAPv2 - 0xC223)**:
-   - Server sends `Challenge` (16 bytes).
-   - Client generates 16-byte `PeerChallenge` and computes 24-byte `NT-Response` via DES operations on 8-byte `ChallengeHash` (RFC 2759).
-   - Client responds with 49-byte CHAP payload.
-   - Server returns `Success` with `AuthenticatorResponse` (`S=<40 hex digits>`).
-3. **IPCP (IP Control Protocol - 0x8021)**:
-   - Client sends `Configure-Request` requesting IP `0.0.0.0` and DNS `0.0.0.0`.
-   - Server responds with `Configure-Nak` containing assigned client IP, Primary DNS, and Secondary DNS.
-   - Client acks and establishes tunnel interface (`VpnService.Builder.establish()`).
+The Point-to-Point Protocol (PPP) handles authentication and network layer configuration over SSTP Data Packets:
+
+```mermaid
+sequenceDiagram
+    participant C as Radin VPN Client
+    participant S as SoftEther Server
+
+    Note over C,S: 1. TLS & HTTP Duplex Handshake (Port 443)
+    C->>S: SSTP_MSG_CALL_CONNECT_REQUEST
+    S->>C: SSTP_MSG_CALL_CONNECT_ACK (Nonce, HashMask=0x02)
+
+    Note over C,S: 2. Link Control Protocol (LCP - 0xC021)
+    C->>S: LCP Configure-Request (MRU=1430, MagicNum)
+    S->>C: LCP Configure-Request (AuthProto=PAP or MS-CHAPv2)
+    C->>S: LCP Configure-Nak (PAP -> MS-CHAPv2)
+    S->>C: LCP Configure-Ack (MS-CHAPv2 Confirmed)
+    C->>S: LCP Configure-Ack
+
+    Note over C,S: 3. MS-CHAPv2 Authentication (0xC223)
+    S->>C: CHAP Challenge (16-byte ServerChallenge)
+    C->>S: CHAP Response (16B PeerChallenge, 24B NT-Response)
+    S->>C: CHAP Success (AuthenticatorResponse S=...)
+
+    Note over C,S: 4. SSTP Crypto Binding
+    C->>S: SSTP_MSG_CALL_CONNECTED (CMAC, CertSha256)
+
+    Note over C,S: 5. IP Control Protocol (IPCP - 0x8021)
+    C->>S: IPCP Configure-Request (IP=0.0.0.0, DNS=0.0.0.0)
+    S->>C: IPCP Configure-Nak (Assigned IP=10.x.x.x, DNS=10.x.x.x)
+    C->>S: IPCP Configure-Request (Assigned IP, DNS)
+    S->>C: IPCP Configure-Ack
+    C->>S: IPCP Configure-Ack
+
+    Note over C,S: 6. Active Tunnel (Encrypted IPv4 Data Packets)
+```
+
+### Critical SoftEther Server Timing Constraints
+- **1-Second PPP Timer Tick:** SoftEther VPN Server ticks its internal PPP timer every 1000 ms (`Proto_PPP.c`).
+- **High-RTT Sensitivity:** When connecting from Iranian networks to Asian (Japan) or European servers, round-trip time (RTT) exceeds 600 ms. If a transport strategy clamps the TCP receive window or introduces artificial delay stalls (such as Zapret 28ms packet pacing), the round-trip latency of multi-turn PPP packets (e.g. `Configure-Request` -> `Configure-Nak` -> `Configure-Request` -> `Configure-Ack`) exceeds SoftEther's timer threshold.
+- **Consequence of Window Clamping:** The server initiates LCP termination (`LCP Terminate-Request`) and drops the connection.
+- **Design Principle for Radin VPN:** Never clamp the TCP receive window on high-RTT links. Allow the OS kernel to dynamically scale the TCP window (`tcp_rmem` auto-tuning) to ensure immediate ACK processing and zero retransmission stalls.
 
 ---
 
-## 3. SNI-Blocking Bypass Strategies
+## 4. SNI Censorship Evasion Mechanics
 
-Deep Packet Inspection (DPI) censorship equipment monitors the unencrypted `Server Name Indication` (SNI) extension inside the initial TLS `ClientHello` segment. Aether VPN defeats this via three automatic fallback strategies:
+Deep Packet Inspection (DPI) censorship middleboxes monitor the unencrypted `Server Name Indication` (SNI) extension inside the initial TLS `ClientHello` packet. Radin VPN defeats DPI through several complementary strategies:
 
-1. **Direct IP / No SNI (`DIRECT_IP_NO_SNI`)**:
-   Connects directly to the IP without populating the TLS SNI extension. SoftEther servers host SSTP by default on their IP endpoint and do not require SNI.
-2. **TCP ClientHello Fragmentation (`TCP_FRAGMENTATION`)**:
-   Splits the initial TLS ClientHello across two separate TCP packets with a brief timing delay (10ms) and `TCP_NODELAY`. Because censorship middleboxes perform stateless inspection or have small reassembly buffers, the split SNI domain name evades detection while the destination server's TCP stack reassembles the stream transparently.
-3. **TLS Record Fragmentation (`TLS_RECORD_FRAGMENTATION`)**:
-   Splits the ClientHello handshake payload across two distinct TLS Handshake records (`ContentType: 0x16`). Conforming TLS implementations (RFC 5246 Section 6.2.1) reassemble multi-record handshake messages before processing.
-4. **Custom / Fake SNI (`CUSTOM_SNI`)**:
-   Replaces the SNI hostname with an unblocked domain name while preserving connection to the destination server IP.
+1. **Direct IP / No SNI (`DIRECT_IP_NO_SNI` / `DISABLED`)**:
+   - SoftEther servers bind SSTP to their public IP endpoint and do not require SNI.
+   - Connecting directly without populating the SNI extension results in a completely clean ClientHello containing no domain for DPI filters to inspect, while avoiding any TCP stream manipulation.
+2. **TLS Header Desync (`TLS_HEADER_DESYNC`)**:
+   - The initial 5-byte TLS record header (`0x16 0x03 0x01 Length_Hi Length_Lo`) is split across separate TCP segments with a 2-byte initial chunk.
+   - Stateful DPI middleboxes fail to recognize the TLS protocol handshake and pass the stream through without triggering SNI pattern matchers.
+3. **Surgical Multi-Chunk SNI Splitting (`MULTI_CHUNK_FRAGMENTATION`)**:
+   - `TlsClientHelloInspector` parses the raw ClientHello byte structure, finds the exact byte offset of the SNI extension, and splits the handshake record precisely across the SNI domain midpoint.
+   - Evades middleboxes with small reassembly windows while allowing the destination server's standard TLS stack to reassemble the handshake.
+4. **Decoy SNI (`DECOY_SNI_FRAGMENT`)**:
+   - Wraps the connection with an initial benign or whitelisted domain before transitioning to the payload.
 
 ---
 
-## 4. DNS over TLS (RFC 7858) Interceptor
+## 5. DNS over TLS (DoT) & DNS over HTTPS (DoH) Pipeline
 
 1. The TUN interface intercepts outbound IPv4 UDP packets destined for port 53.
-2. The packet payload (DNS wire format) is forwarded over an established TLS connection on port 853 to the user's selected DoT resolver (Cloudflare, Google, Quad9, AdGuard).
-3. The resolver's response is encapsulated into a synthesized IPv4 UDP packet matching the client's original query port and written back to the TUN descriptor.
-4. In **DNS-Only Mode**, the VPN routes only the dummy DNS address (`10.254.254.254/32`), allowing all general app traffic to bypass the VPN tunnel entirely.
-
+2. The packet payload (DNS wire format) is dispatched into a bounded 6-worker queue.
+3. Queries are forwarded over RFC 7858 DoT (port 853) or RFC 8484 DoH (port 443) using persistent HTTP/2 pipelining:
+   - Primary: Cloudflare (`1.1.1.1`), Google (`8.8.8.8`), Quad9 (`9.9.9.9`), AdGuard (`94.140.14.14`).
+   - Responses are cached in `DnsResponseCache` with strict TTL compliance and LRU eviction.
+4. In **Split DNS Mode**, Iranian domains (`.ir`) and domestic services are excluded from the tunnel and resolved natively through the physical network interface (`SocketProtector.protect()`), ensuring high speed and zero bank/tax portal blockages.

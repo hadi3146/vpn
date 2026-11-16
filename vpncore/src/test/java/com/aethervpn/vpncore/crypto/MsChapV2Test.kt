@@ -52,6 +52,27 @@ class MsChapV2Test {
         )
         val expectedAuthResp = "S=407A5589115FD0D6209F510FE9C04566932CDA56"
         assertEquals("AuthenticatorResponse mismatch", expectedAuthResp, authResp)
+
+        // Verify RFC 3079 asymmetric key order (SendKey = client send / server recv, RecvKey = client recv / server send)
+        val ntHashHash = MsChapV2.hashNtPasswordHash(ntHash)
+        val masterKey = MsChapV2.getMasterKey(ntHashHash, ntResponse)
+        assertEquals(16, masterKey.size)
+        val sendMagic = "On the client side, this is the send key; on the server side, it is the receive key."
+            .toByteArray(Charsets.US_ASCII)
+        val recvMagic = "On the client side, this is the receive key; on the server side, it is the send key."
+            .toByteArray(Charsets.US_ASCII)
+        val pad1 = ByteArray(40)
+        val pad2 = ByteArray(40) { 0xF2.toByte() }
+        val expectedSendKey = java.security.MessageDigest.getInstance("SHA-1").run {
+            update(masterKey); update(pad1); update(sendMagic); update(pad2)
+            digest().copyOfRange(0, 16)
+        }
+        val expectedRecvKey = java.security.MessageDigest.getInstance("SHA-1").run {
+            update(masterKey); update(pad1); update(recvMagic); update(pad2)
+            digest().copyOfRange(0, 16)
+        }
+        assertArrayEquals("Client SendKey mismatch", expectedSendKey, MsChapV2.getAsymmetricKey(masterKey, isSend = true))
+        assertArrayEquals("Client RecvKey mismatch", expectedRecvKey, MsChapV2.getAsymmetricKey(masterKey, isSend = false))
     }
 }
 

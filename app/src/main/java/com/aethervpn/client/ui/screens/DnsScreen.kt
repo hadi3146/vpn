@@ -45,6 +45,7 @@ fun DnsScreen(
     onResolverSelect: (String) -> Unit
 ) {
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(title = { Text(stringResource(R.string.nav_dns)) })
         }

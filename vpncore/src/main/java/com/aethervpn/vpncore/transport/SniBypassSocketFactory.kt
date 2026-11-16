@@ -4,11 +4,11 @@ import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.cert.X509Certificate
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -22,7 +22,8 @@ class SniBypassSocketFactory(
     private val customSni: String? = null,
     private val strictCert: Boolean = false,
     private val socketProtector: SocketProtector? = null,
-    private val onCertificateCaptured: ((X509Certificate) -> Unit)? = null
+    private val onCertificateCaptured: ((X509Certificate) -> Unit)? = null,
+    private val onSocketCreated: ((Socket) -> Unit)? = null
 ) {
 
     private val trustManager = object : X509TrustManager {
@@ -32,9 +33,7 @@ class SniBypassSocketFactory(
                 onCertificateCaptured?.invoke(chain[0])
             }
             if (strictCert) {
-                // If strict validation is requested, delegate to system default
-                val defaultTm = getDefaultTrustManager()
-                defaultTm.checkServerTrusted(chain, authType)
+                getDefaultTrustManager().checkServerTrusted(chain, authType)
             }
         }
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
@@ -48,72 +47,246 @@ class SniBypassSocketFactory(
         return tmf.trustManagers.first { it is X509TrustManager } as X509TrustManager
     }
 
+    private fun effectiveStrategy(): SniStrategy =
+        if (strategy == SniStrategy.AUTO_SMART) SniStrategy.DIRECT_IP_NO_SNI else strategy
+
+    private fun isRawIp(host: String): Boolean {
+        if (host.isBlank() || host.equals("opengw", ignoreCase = true)) return true
+        val parts = host.split('.')
+        if (parts.size != 4) return false
+        return parts.all { it.toIntOrNull() in 0..255 }
+    }
+
+    private fun resolveTargetSni(host: String): String? {
+        val eff = effectiveStrategy()
+        if (eff == SniStrategy.DIRECT_IP_NO_SNI) {
+            return null
+        }
+        if (!customSni.isNullOrBlank()) {
+            return customSni
+        }
+        return when (eff) {
+            SniStrategy.DECOY_SNI_FRAGMENT ->
+                SniStrategy.DEFAULT_DECOY_SNIS.first()
+            SniStrategy.CUSTOM_SNI ->
+                if (isRawIp(host)) SniStrategy.DEFAULT_DECOY_SNIS.first() else host
+            SniStrategy.TCP_FRAGMENTATION,
+            SniStrategy.TLS_RECORD_FRAGMENTATION,
+            SniStrategy.MULTI_CHUNK_FRAGMENTATION,
+            SniStrategy.TLS_HEADER_DESYNC,
+            SniStrategy.WINDOW_ALPN_MICRO_DESYNC,
+            SniStrategy.ZAPRET_SPLIT1_DESYNC ->
+                if (isRawIp(host)) SniStrategy.DEFAULT_DECOY_SNIS.first() else host
+            else ->
+                if (isRawIp(host)) null else host
+        }
+    }
+
+    private fun openWrappedSocket(
+        ipAddress: InetAddress,
+        port: Int,
+        timeoutMs: Int
+    ): Socket {
+        val eff = effectiveStrategy()
+        val isWindowMicro = eff == SniStrategy.WINDOW_ALPN_MICRO_DESYNC || eff == SniStrategy.ZAPRET_SPLIT1_DESYNC
+        val rawSocket = openProtectedTcpSocket(
+            ipAddress = ipAddress,
+            port = port,
+            connectTimeoutMs = timeoutMs,
+            readTimeoutMs = timeoutMs,
+            socketProtector = socketProtector,
+            receiveBufferSizeBytes = 8 * 1024 * 1024, // 8MB TCP Window for high-speed streaming
+            trafficClass = if (isWindowMicro) 0x10 else 0x08
+        )
+        onSocketCreated?.invoke(rawSocket)
+        return when (eff) {
+            SniStrategy.TCP_FRAGMENTATION -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = splitPosition.coerceIn(3, 64),
+                tcpDelayMs = splitDelayMs,
+                splitTlsRecords = false,
+                useSniAwareTcpSlices = false
+            )
+            SniStrategy.TLS_RECORD_FRAGMENTATION -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = 0,
+                tcpDelayMs = 0L,
+                splitTlsRecords = true,
+                maxTlsRecordPayload = splitPosition.coerceIn(16, 128),
+                useSniAwareTcpSlices = false
+            )
+            SniStrategy.MULTI_CHUNK_FRAGMENTATION,
+            SniStrategy.DECOY_SNI_FRAGMENT -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = 36,
+                tcpDelayMs = minOf(splitDelayMs, 4L).coerceAtLeast(2L),
+                splitTlsRecords = true,
+                maxTlsRecordPayload = 64,
+                surgicalSniRecordSplit = true,
+                useSniAwareTcpSlices = true
+            )
+            SniStrategy.TLS_HEADER_DESYNC -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = 24,
+                tcpDelayMs = minOf(splitDelayMs, 4L).coerceAtLeast(2L),
+                splitTlsRecords = false,
+                useSniAwareTcpSlices = false,
+                headerDesync = true
+            )
+            SniStrategy.WINDOW_ALPN_MICRO_DESYNC -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = 24,
+                tcpDelayMs = 2L,
+                splitTlsRecords = false,
+                useSniAwareTcpSlices = false,
+                microDesync = true,
+                headerStallMs = 22L
+            )
+            SniStrategy.ZAPRET_SPLIT1_DESYNC -> ClientHelloTransformSocket(
+                delegate = rawSocket,
+                tcpChunkSize = 24,
+                tcpDelayMs = 3L,
+                splitTlsRecords = false,
+                useSniAwareTcpSlices = false,
+                zapretSplit1 = true,
+                headerStallMs = 28L
+            )
+            else -> rawSocket
+        }
+    }
+
+    private fun configureSslParameters(
+        params: SSLParameters,
+        host: String,
+        targetSni: String?,
+        supportedCipherSuites: Array<String>,
+        supportedProtocols: Array<String>
+    ): SSLParameters {
+        val eff = effectiveStrategy()
+        if (eff == SniStrategy.DIRECT_IP_NO_SNI) {
+            params.serverNames = emptyList()
+        } else if (!targetSni.isNullOrBlank()) {
+            params.serverNames = listOf(SNIHostName(targetSni))
+        } else if (eff != SniStrategy.DISABLED && host.isNotBlank()) {
+            // Keep default host SNI if not overridden
+        }
+
+        if (eff != SniStrategy.DISABLED) {
+            val preferredProtos = listOf("TLSv1.3", "TLSv1.2").filter { it in supportedProtocols }
+            if (preferredProtos.isNotEmpty()) {
+                params.protocols = preferredProtos.toTypedArray()
+            }
+            val isWindowMicro = eff == SniStrategy.WINDOW_ALPN_MICRO_DESYNC || eff == SniStrategy.ZAPRET_SPLIT1_DESYNC
+            val prioritizedCiphers = prioritizeBrowserCipherSuites(
+                supportedCipherSuites,
+                limitTail = if (isWindowMicro) 6 else Int.MAX_VALUE
+            )
+            if (prioritizedCiphers.isNotEmpty()) {
+                params.cipherSuites = prioritizedCiphers
+            }
+            if (isWindowMicro) {
+                params.useCipherSuitesOrder = true
+                // Guard ALPN reflection-style so both JVM 17+ and Android API 24..28 run cleanly without NewApi issues.
+                runCatching {
+                    params.javaClass
+                        .getMethod("setApplicationProtocols", Array<String>::class.java)
+                        .invoke(params, arrayOf("http/1.1"))
+                }
+            }
+        }
+        return params
+    }
+
+    private fun prioritizeBrowserCipherSuites(
+        supported: Array<String>,
+        limitTail: Int = Int.MAX_VALUE
+    ): Array<String> {
+        if (supported.isEmpty()) return supported
+        val browserTop = listOf(
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+        )
+        val supportedSet = supported.toHashSet()
+        val head = browserTop.filter { it in supportedSet }
+        if (head.isEmpty()) return supported
+        val headSet = head.toHashSet()
+        val tail = supported.filter { it !in headSet }
+        val boundedTail = if (limitTail < tail.size) tail.take(limitTail) else tail
+        return (head + boundedTail).toTypedArray()
+    }
+
+    fun createAndConnectTransport(
+        host: String,
+        ipAddress: InetAddress,
+        port: Int,
+        timeoutMs: Int = 10000
+    ): SstpTransport {
+        val wrappedSocket = openWrappedSocket(ipAddress, port, timeoutMs)
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, arrayOf<TrustManager>(trustManager), null)
+
+        val eff = effectiveStrategy()
+        val targetSni = resolveTargetSni(host)
+        val peerHost = when {
+            eff == SniStrategy.DIRECT_IP_NO_SNI -> ipAddress.hostAddress
+            !targetSni.isNullOrBlank() -> targetSni
+            else -> host.ifBlank { ipAddress.hostAddress }
+        }
+        val engine: SSLEngine = sslContext.createSSLEngine(peerHost, port)
+        engine.useClientMode = true
+        engine.sslParameters = configureSslParameters(
+            params = engine.sslParameters,
+            host = host,
+            targetSni = targetSni,
+            supportedCipherSuites = engine.supportedCipherSuites,
+            supportedProtocols = engine.supportedProtocols
+        )
+
+        val transport = SslEngineTransport(wrappedSocket, engine)
+        transport.doHandshake()
+        return transport
+    }
+
     fun createAndConnectSocket(
         host: String,
         ipAddress: InetAddress,
         port: Int,
         timeoutMs: Int = 10000
     ): SSLSocket {
-        // Step 1: Create raw TCP socket and protect it
-        val rawSocket = Socket()
-        socketProtector?.protect(rawSocket)
-        rawSocket.tcpNoDelay = true
-        rawSocket.soTimeout = timeoutMs
-        rawSocket.connect(InetSocketAddress(ipAddress, port), timeoutMs)
-
-        // Step 2: Wrap socket stream if fragmentation strategy is enabled
-        val wrappedSocket = when (strategy) {
-            SniStrategy.TCP_FRAGMENTATION -> FragmentedTcpSocket(rawSocket, splitPosition, splitDelayMs)
-            SniStrategy.TLS_RECORD_FRAGMENTATION -> TlsRecordFragmentedSocket(rawSocket, splitPosition)
-            else -> rawSocket
-        }
-
-        // Step 3: Wrap with SSLSocket
+        val wrappedSocket = openWrappedSocket(ipAddress, port, timeoutMs)
         val sslContext = SSLContext.getInstance("TLS")
         sslContext.init(null, arrayOf<TrustManager>(trustManager), null)
         val sslSocketFactory: SSLSocketFactory = sslContext.socketFactory
 
-        val sslSocket = when (strategy) {
-            SniStrategy.DIRECT_IP_NO_SNI -> {
-                // Connecting with IP address as host name disables SNI in Conscrypt/JSSE
-                sslSocketFactory.createSocket(
-                    wrappedSocket,
-                    ipAddress.hostAddress,
-                    port,
-                    true
-                ) as SSLSocket
-            }
-            SniStrategy.CUSTOM_SNI -> {
-                val sock = sslSocketFactory.createSocket(
-                    wrappedSocket,
-                    ipAddress.hostAddress,
-                    port,
-                    true
-                ) as SSLSocket
-                val params = sock.sslParameters ?: SSLParameters()
-                val sniHost = customSni?.takeIf { it.isNotBlank() } ?: host
-                params.serverNames = listOf(SNIHostName(sniHost))
-                sock.sslParameters = params
-                sock
-            }
-            else -> {
-                // Normal host or fragmented
-                val sock = sslSocketFactory.createSocket(
-                    wrappedSocket,
-                    host,
-                    port,
-                    true
-                ) as SSLSocket
-                if (strategy == SniStrategy.TCP_FRAGMENTATION || strategy == SniStrategy.TLS_RECORD_FRAGMENTATION) {
-                    val params = sock.sslParameters ?: SSLParameters()
-                    if (!customSni.isNullOrBlank()) {
-                        params.serverNames = listOf(SNIHostName(customSni))
-                    }
-                    sock.sslParameters = params
-                }
-                sock
-            }
+        val eff = effectiveStrategy()
+        val targetSni = resolveTargetSni(host)
+        val sslSocket = if (eff == SniStrategy.DIRECT_IP_NO_SNI) {
+            sslSocketFactory.createSocket(
+                wrappedSocket, ipAddress.hostAddress, port, true
+            ) as SSLSocket
+        } else if (!targetSni.isNullOrBlank()) {
+            sslSocketFactory.createSocket(
+                wrappedSocket, targetSni, port, true
+            ) as SSLSocket
+        } else {
+            sslSocketFactory.createSocket(
+                wrappedSocket, host.ifBlank { ipAddress.hostAddress }, port, true
+            ) as SSLSocket
         }
+        sslSocket.sslParameters = configureSslParameters(
+            params = sslSocket.sslParameters ?: SSLParameters(),
+            host = host,
+            targetSni = targetSni,
+            supportedCipherSuites = sslSocket.supportedCipherSuites,
+            supportedProtocols = sslSocket.supportedProtocols
+        )
 
         sslSocket.useClientMode = true
         sslSocket.startHandshake()
@@ -121,14 +294,23 @@ class SniBypassSocketFactory(
     }
 
     /**
-     * Splits the initial TLS ClientHello at the TCP level into two chunks.
+     * Unified first-flight TLS ClientHello transformer supporting surgical SNI-midpoint
+     * multi-record TLS splitting, 2-byte TLS record header desync, and bounded TCP pacing.
      */
-    private class FragmentedTcpSocket(
+    private class ClientHelloTransformSocket(
         private val delegate: Socket,
-        private val splitPos: Int,
-        private val splitDelayMs: Long
+        private val tcpChunkSize: Int,
+        private val tcpDelayMs: Long,
+        private val splitTlsRecords: Boolean,
+        private val maxTlsRecordPayload: Int = 40,
+        private val surgicalSniRecordSplit: Boolean = false,
+        private val useSniAwareTcpSlices: Boolean = false,
+        private val headerDesync: Boolean = false,
+        private val microDesync: Boolean = false,
+        private val zapretSplit1: Boolean = false,
+        private val headerStallMs: Long = 0L
     ) : Socket() {
-        private var fragmented = false
+        private var transformed = false
 
         override fun getInputStream(): InputStream = delegate.inputStream
 
@@ -136,20 +318,33 @@ class SniBypassSocketFactory(
             val original = delegate.outputStream
             return object : FilterOutputStream(original) {
                 override fun write(b: ByteArray, off: Int, len: Int) {
-                    // Check if this is the first write and looks like a TLS Handshake record (0x16 0x03)
-                    if (!fragmented && len > splitPos && b[off] == 0x16.toByte() && b[off + 1] == 0x03.toByte()) {
-                        fragmented = true
-                        // Write chunk 1
-                        original.write(b, off, splitPos)
-                        original.flush()
-                        try {
-                            if (splitDelayMs > 0) {
-                                Thread.sleep(splitDelayMs)
+                    if (!transformed && len > 8 &&
+                        b[off] == 0x16.toByte() && b[off + 1] == 0x03.toByte()
+                    ) {
+                        transformed = true
+                        val records = if (splitTlsRecords) {
+                            TlsClientHelloInspector.splitTlsRecord(
+                                packet = b,
+                                offset = off,
+                                length = len,
+                                maxPayloadPerRecord = maxTlsRecordPayload,
+                                surgicalSniOnly = surgicalSniRecordSplit
+                            )
+                        } else {
+                            listOf(b.copyOfRange(off, off + len))
+                        }
+
+                        for ((idx, record) in records.withIndex()) {
+                            // When splitting into multiple TLS records surgically around SNI,
+                            // segment only the initial SNI-bearing records to avoid excessive micro-packets.
+                            val applySegmentation = !splitTlsRecords || !surgicalSniRecordSplit || idx <= 1
+                            if (applySegmentation) {
+                                writeSegmented(original, record)
+                            } else {
+                                original.write(record)
+                                original.flush()
                             }
-                        } catch (_: InterruptedException) {}
-                        // Write chunk 2
-                        original.write(b, off + splitPos, len - splitPos)
-                        original.flush()
+                        }
                     } else {
                         original.write(b, off, len)
                     }
@@ -169,77 +364,65 @@ class SniBypassSocketFactory(
             }
         }
 
-        override fun isConnected(): Boolean = delegate.isConnected
-        override fun isClosed(): Boolean = delegate.isClosed
-        override fun close() = delegate.close()
-        override fun setSoTimeout(timeout: Int) { delegate.soTimeout = timeout }
-        override fun getSoTimeout(): Int = delegate.soTimeout
-    }
+        private fun writeSegmented(out: OutputStream, bytes: ByteArray) {
+            if (zapretSplit1 && bytes.size > 5) {
+                val slices = TlsClientHelloInspector.computeSplit1Slices(bytes)
+                writeSlices(out, bytes, slices)
+                return
+            }
+            if (microDesync && bytes.size > 5) {
+                val slices = TlsClientHelloInspector.computeMicroDesyncSlices(bytes)
+                writeSlices(out, bytes, slices)
+                return
+            }
+            if (headerDesync && bytes.size > 2) {
+                val slices = TlsClientHelloInspector.computeDesyncSlices(bytes)
+                writeSlices(out, bytes, slices)
+                return
+            }
+            if (tcpChunkSize <= 0 || bytes.size <= tcpChunkSize) {
+                out.write(bytes)
+                out.flush()
+                return
+            }
 
-    /**
-     * Splits a single TLS Handshake record into two valid TLS Handshake records.
-     */
-    private class TlsRecordFragmentedSocket(
-        private val delegate: Socket,
-        private val splitPos: Int
-    ) : Socket() {
-        private var fragmented = false
+            if (useSniAwareTcpSlices) {
+                val slices = TlsClientHelloInspector.computeTcpSplitSlices(
+                    packet = bytes,
+                    offset = 0,
+                    length = bytes.size,
+                    chunkSize = tcpChunkSize,
+                    maxSegments = 6
+                )
+                writeSlices(out, bytes, slices)
+            } else {
+                val split = tcpChunkSize.coerceIn(1, bytes.size - 1)
+                out.write(bytes, 0, split)
+                out.flush()
+                if (tcpDelayMs > 0) {
+                    try {
+                        Thread.sleep(tcpDelayMs)
+                    } catch (_: InterruptedException) {}
+                }
+                out.write(bytes, split, bytes.size - split)
+                out.flush()
+            }
+        }
 
-        override fun getInputStream(): InputStream = delegate.inputStream
-
-        override fun getOutputStream(): OutputStream {
-            val original = delegate.outputStream
-            return object : FilterOutputStream(original) {
-                override fun write(b: ByteArray, off: Int, len: Int) {
-                    // TLS Record Header: [0]=ContentType, [1..2]=Version, [3..4]=Length
-                    if (!fragmented && len > 5 + splitPos && b[off] == 0x16.toByte() && b[off + 1] == 0x03.toByte()) {
-                        fragmented = true
-                        val recordVersionMajor = b[off + 1]
-                        val recordVersionMinor = b[off + 2]
-                        val payloadLen = ((b[off + 3].toInt() and 0xFF) shl 8) or (b[off + 4].toInt() and 0xFF)
-
-                        if (len == 5 + payloadLen && splitPos < payloadLen) {
-                            val chunk1Len = splitPos
-                            val chunk2Len = payloadLen - chunk1Len
-
-                            // Record 1
-                            val rec1 = ByteArray(5 + chunk1Len)
-                            rec1[0] = 0x16.toByte()
-                            rec1[1] = recordVersionMajor
-                            rec1[2] = recordVersionMinor
-                            rec1[3] = ((chunk1Len ushr 8) and 0xFF).toByte()
-                            rec1[4] = (chunk1Len and 0xFF).toByte()
-                            System.arraycopy(b, off + 5, rec1, 5, chunk1Len)
-
-                            // Record 2
-                            val rec2 = ByteArray(5 + chunk2Len)
-                            rec2[0] = 0x16.toByte()
-                            rec2[1] = recordVersionMajor
-                            rec2[2] = recordVersionMinor
-                            rec2[3] = ((chunk2Len ushr 8) and 0xFF).toByte()
-                            rec2[4] = (chunk2Len and 0xFF).toByte()
-                            System.arraycopy(b, off + 5 + chunk1Len, rec2, 5, chunk2Len)
-
-                            original.write(rec1)
-                            original.flush()
-                            original.write(rec2)
-                            original.flush()
-                            return
+        private fun writeSlices(out: OutputStream, bytes: ByteArray, slices: List<IntRange>) {
+            for ((idx, range) in slices.withIndex()) {
+                val sliceLen = range.last - range.first + 1
+                if (sliceLen > 0) {
+                    out.write(bytes, range.first, sliceLen)
+                    out.flush()
+                    if (idx < slices.lastIndex) {
+                        val pauseMs = if (headerStallMs > 0L && (range.last == 0 || range.last == 4)) headerStallMs else tcpDelayMs
+                        if (pauseMs > 0) {
+                            try {
+                                Thread.sleep(pauseMs)
+                            } catch (_: InterruptedException) {}
                         }
                     }
-                    original.write(b, off, len)
-                }
-
-                override fun write(b: Int) {
-                    original.write(b)
-                }
-
-                override fun flush() {
-                    original.flush()
-                }
-
-                override fun close() {
-                    original.close()
                 }
             }
         }
@@ -251,4 +434,3 @@ class SniBypassSocketFactory(
         override fun getSoTimeout(): Int = delegate.soTimeout
     }
 }
-

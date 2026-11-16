@@ -8,5 +8,11 @@ build/
 /captures
 .externalNativeBuild
 .cxx
+.kotlin/
 local.properties
+*.apk
+keystore.properties
+*.jks
+*.keystore
+vpngate-mirrors/
 

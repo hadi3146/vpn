@@ -28,10 +28,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.aethervpn.client.data.datastore.VpnProtocol
 import com.aethervpn.client.ui.components.DisclaimerDialog
 import com.aethervpn.client.ui.navigation.BottomNavScreens
 import com.aethervpn.client.ui.navigation.Screen
@@ -84,9 +86,14 @@ class MainActivity : ComponentActivity() {
             viewModel.addLog("Requesting VPN system consent...")
             vpnConsentLauncher.launch(intent)
         } else {
-            val server = viewModel.selectedServer.value ?: viewModel.servers.value.firstOrNull()
-            if (server != null) {
-                Toast.makeText(this, "Connecting to ${server.countryLong.ifBlank { server.hostName }}...", Toast.LENGTH_SHORT).show()
+            val isWarp = viewModel.settings.value.vpnProtocol == VpnProtocol.WARP
+            if (isWarp) {
+                Toast.makeText(this, "Connecting to Cloudflare WARP...", Toast.LENGTH_SHORT).show()
+            } else {
+                val server = viewModel.selectedServer.value ?: viewModel.servers.value.firstOrNull()
+                if (server != null) {
+                    Toast.makeText(this, "Connecting to ${server.countryLong.ifBlank { server.hostName }}...", Toast.LENGTH_SHORT).show()
+                }
             }
             viewModel.connectSelectedServer()
         }
@@ -121,6 +128,10 @@ fun MainAppContent(
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val iranCidrInfo by viewModel.iranCidrInfo.collectAsState()
+    val isUpdatingCidrs by viewModel.isUpdatingCidrs.collectAsState()
+    val isBatchPinging by viewModel.isBatchPinging.collectAsState()
+    val batchPingProgress by viewModel.batchPingProgress.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
     var showDisclaimer by remember { mutableStateOf(false) }
@@ -132,14 +143,32 @@ fun MainAppContent(
                 BottomNavScreens.forEach { screen ->
                     NavigationBarItem(
                         icon = { Icon(screen.icon, contentDescription = null) },
-                        label = { Text(stringResource(screen.titleResId)) },
-                        selected = currentRoute == screen.route,
+                        label = {
+                            Text(
+                                text = stringResource(screen.titleResId),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        selected = currentRoute == screen.route ||
+                            (screen == Screen.Settings && currentRoute == Screen.Logs.route),
                         onClick = {
                             if (currentRoute != screen.route) {
-                                navController.navigate(screen.route) {
-                                    popUpTo(Screen.Home.route) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
+                                if (screen.route == Screen.Home.route) {
+                                    val popped = navController.popBackStack(Screen.Home.route, inclusive = false)
+                                    if (!popped) {
+                                        navController.navigate(Screen.Home.route) {
+                                            popUpTo(Screen.Home.route) { inclusive = false }
+                                            launchSingleTop = true
+                                        }
+                                    }
+                                } else {
+                                    navController.navigate(screen.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 }
                             }
                         }
@@ -157,14 +186,25 @@ fun MainAppContent(
                 HomeScreen(
                     vpnState = vpnState,
                     selectedServer = selectedServer,
+                    vpnProtocol = settings.vpnProtocol,
+                    onProtocolSelected = { viewModel.setVpnProtocol(it) },
+                    bypassIran = settings.bypassIran,
+                    blockIpv6 = settings.blockIpv6,
+                    blockQuic = settings.blockQuic,
                     onConnectClick = onConnectRequest,
                     onDisconnectClick = { viewModel.disconnect() },
-                    onQuickConnectClick = {
-                        viewModel.quickConnect()
-                        onConnectRequest()
-                    },
+                    onSwitchServerClick = { viewModel.switchToAnotherServer() },
                     onSelectServerClick = {
-                        navController.navigate(Screen.Servers.route)
+                        if (settings.vpnProtocol == VpnProtocol.WARP) {
+                            viewModel.rescanWarpCleanIp()
+                        } else {
+                            navController.navigate(Screen.Servers.route) {
+                                launchSingleTop = true
+                            }
+                        }
+                    },
+                    onOpenLogs = {
+                        navController.navigate(Screen.Logs.route) { launchSingleTop = true }
                     }
                 )
             }
@@ -172,16 +212,22 @@ fun MainAppContent(
                 ServersScreen(
                     servers = servers,
                     isRefreshing = isRefreshing,
+                    isBatchPinging = isBatchPinging,
+                    batchPingProgress = batchPingProgress,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { viewModel.setSearchQuery(it) },
                     onRefresh = { viewModel.refreshServers() },
+                    onBatchPing = { viewModel.testBatchPings() },
                     onServerSelect = { server ->
                         viewModel.selectServer(server)
-                        navController.navigate(Screen.Home.route)
+                        navController.popBackStack(Screen.Home.route, inclusive = false)
                     },
                     onToggleFavorite = { viewModel.toggleFavorite(it) },
-                    onAddCustomServer = { viewModel.addCustomServer(it) },
-                    onPingTest = { viewModel.testServerPing(it) }
+                    onSaveCustomServer = { server, prevHost -> viewModel.saveCustomServer(server, prevHost) },
+                    onDeleteServer = { viewModel.deleteServer(it) },
+                    onClearCooldowns = { viewModel.clearServerCooldowns() },
+                    onPingTest = { viewModel.testServerPing(it) },
+                    onBackClick = { navController.popBackStack(Screen.Home.route, inclusive = false) }
                 )
             }
             composable(Screen.Dns.route) {
@@ -202,21 +248,41 @@ fun MainAppContent(
             composable(Screen.Settings.route) {
                 SettingsScreen(
                     settings = settings,
+                    onVpnProtocolChange = { viewModel.setVpnProtocol(it) },
+                    onSoftEtherConnectionsChange = { viewModel.updateSoftEtherConnections(it) },
                     onStrictCertChange = { viewModel.updateStrictCert(it) },
                     onSniStrategyChange = { viewModel.updateSniStrategy(it) },
                     onCustomSniChange = { viewModel.updateCustomSni(it) },
                     onMtuChange = { viewModel.updateMtu(it) },
                     onKeepaliveChange = { viewModel.updateKeepalive(it) },
                     onKillSwitchChange = { viewModel.updateKillSwitch(it) },
+                    onAutoFailoverChange = { viewModel.updateAutoFailover(it) },
+                    onBlockQuicChange = { viewModel.updateBlockQuic(it) },
+                    onBypassIranChange = { viewModel.updateBypassIran(it) },
+                    onBlockIpv6Change = { viewModel.updateBlockIpv6(it) },
+                    onCustomBypassRulesChange = { viewModel.updateCustomBypassRules(it) },
+                    onResetLearnedProfiles = { viewModel.clearLearnedBypassProfiles() },
+                    isScanningBypass = vpnState.isScanningBypass,
+                    latestDiagnosis = vpnState.latestDiagnosis,
+                    onSmartScanClick = { viewModel.runSmartBypassScan() },
+                    iranCidrInfo = iranCidrInfo,
+                    isUpdatingCidrs = isUpdatingCidrs,
+                    onRefreshIranCidrs = { viewModel.refreshIranCidrs() },
+                    onResetIranCidrs = { viewModel.resetIranCidrsToBundled() },
                     onMirrorUrlsChange = { viewModel.updateMirrorUrls(it) },
+                    onResetMirrorUrls = { viewModel.resetMirrorUrlsToDefault() },
                     onLanguageChange = { viewModel.updateLanguage(it) },
-                    onOpenDisclaimer = { showDisclaimer = true }
+                    onOpenDisclaimer = { showDisclaimer = true },
+                    onOpenLogs = {
+                        navController.navigate(Screen.Logs.route) { launchSingleTop = true }
+                    }
                 )
             }
             composable(Screen.Logs.route) {
                 LogsScreen(
                     logs = logs,
-                    onClearLogs = { viewModel.clearLogs() }
+                    onClearLogs = { viewModel.clearLogs() },
+                    onNavigateBack = { navController.popBackStack() }
                 )
             }
         }

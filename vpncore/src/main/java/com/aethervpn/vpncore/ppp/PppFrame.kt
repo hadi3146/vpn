@@ -18,7 +18,16 @@ data class PppFrame(
 
         fun decode(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): PppFrame {
             require(length >= 2) { "PPP frame too short: $length bytes" }
-            val first = bytes[offset].toInt() and 0xFF
+            var off = offset
+            var len = length
+
+            // Skip HDLC Address and Control field (0xFF 0x03) if present
+            if (len >= 4 && (bytes[off].toInt() and 0xFF) == 0xFF && (bytes[off + 1].toInt() and 0xFF) == 0x03) {
+                off += 2
+                len -= 2
+            }
+
+            val first = bytes[off].toInt() and 0xFF
             val protocol: Short
             val headerLen: Int
             // Handle compressed protocol field if lowest bit of first byte is 1
@@ -26,18 +35,20 @@ data class PppFrame(
                 protocol = first.toShort()
                 headerLen = 1
             } else {
-                protocol = (((first shl 8) or (bytes[offset + 1].toInt() and 0xFF))).toShort()
+                protocol = (((first shl 8) or (bytes[off + 1].toInt() and 0xFF))).toShort()
                 headerLen = 2
             }
-            val payloadLen = length - headerLen
+            val payloadLen = len - headerLen
             val payload = ByteArray(payloadLen)
-            System.arraycopy(bytes, offset + headerLen, payload, 0, payloadLen)
+            System.arraycopy(bytes, off + headerLen, payload, 0, payloadLen)
             return PppFrame(protocol, payload)
         }
     }
 
     fun encode(): ByteArray {
-        val buffer = ByteBuffer.allocate(2 + payload.size).order(ByteOrder.BIG_ENDIAN)
+        val buffer = ByteBuffer.allocate(4 + payload.size).order(ByteOrder.BIG_ENDIAN)
+        buffer.put(0xFF.toByte())
+        buffer.put(0x03.toByte())
         buffer.putShort(protocol)
         buffer.put(payload)
         return buffer.array()

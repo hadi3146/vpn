@@ -9,20 +9,30 @@ import javax.crypto.spec.SecretKeySpec
 
 object CryptoBinding {
 
-    const val SSTP_ATTRIB_CRYPTO_BINDING: Byte = 0x04
+    const val SSTP_ATTRIB_CRYPTO_BINDING: Byte = 0x03
     const val CERT_HASH_PROTOCOL_SHA1: Byte = 0x01
     const val CERT_HASH_PROTOCOL_SHA256: Byte = 0x02
 
-    private val SSTP_INNER_METHOD_SEED = "SSTP inner method key derivation"
+    // MS-SSTP §3.2.5.2: 29-byte ASCII seed (without null terminator)
+    private val SSTP_INNER_METHOD_SEED = "SSTP inner method derived CMK"
         .toByteArray(StandardCharsets.US_ASCII)
 
     /**
-     * Derives the Compound MAC Key (CMK) from MS-CHAPv2 master key (or send key).
+     * Derives the Compound MAC Key (CMK) from the 32-byte HLAK per MS-SSTP §3.2.5.2:
+     * CMK = HMAC(HLAK, "SSTP inner method derived CMK" || uint16_le(cmacLen) || 0x01)
      */
-    fun deriveCompoundMacKey(msChapMasterKey: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(msChapMasterKey, "HmacSHA256"))
-        return mac.doFinal(SSTP_INNER_METHOD_SEED)
+    fun deriveCompoundMacKey(hlak: ByteArray, useSha256: Boolean = true): ByteArray {
+        val algorithm = if (useSha256) "HmacSHA256" else "HmacSHA1"
+        val cmacSize: Short = if (useSha256) 32 else 20
+        val input = ByteBuffer.allocate(SSTP_INNER_METHOD_SEED.size + 3)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .put(SSTP_INNER_METHOD_SEED)
+            .putShort(cmacSize)
+            .put(0x01.toByte())
+            .array()
+        val mac = Mac.getInstance(algorithm)
+        mac.init(SecretKeySpec(hlak, algorithm))
+        return mac.doFinal(input)
     }
 
     /**
@@ -57,10 +67,7 @@ object CryptoBinding {
         // Nonce (32 bytes)
         buffer.put(nonce, 0, 32)
 
-        // Compound MAC placeholder (32 bytes zeroes)
-        buffer.put(ByteArray(32))
-
-        // Certificate Hash (32 bytes)
+        // Certificate Hash (32 bytes) — comes BEFORE Compound MAC per MS-SSTP §2.2.8
         if (useSha256) {
             buffer.put(serverCertSha256, 0, 32)
         } else {
@@ -71,24 +78,30 @@ object CryptoBinding {
             buffer.put(paddedSha1)
         }
 
+        // Compound MAC placeholder (32 bytes zeroes)
+        buffer.put(ByteArray(32))
+
         return buffer.array()
     }
 
     /**
-     * Calculates the Compound MAC over the Call Connected packet
-     * and inserts it at the Compound MAC offset in the attribute.
+     * Calculates the Compound MAC over the Call Connected packet (with the 32-byte
+     * Compound MAC field zeroed) and inserts it at [compoundMacOffsetInPacket].
      */
     fun computeAndInsertCompoundMac(
         callConnectedPacket: ByteArray,
         compoundMacKey: ByteArray,
-        compoundMacOffsetInPacket: Int
+        compoundMacOffsetInPacket: Int,
+        useSha256: Boolean = true
     ): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(compoundMacKey, "HmacSHA256"))
+        val algorithm = if (useSha256) "HmacSHA256" else "HmacSHA1"
+        callConnectedPacket.fill(0, compoundMacOffsetInPacket, compoundMacOffsetInPacket + 32)
+        val mac = Mac.getInstance(algorithm)
+        mac.init(SecretKeySpec(compoundMacKey, algorithm))
         val cmac = mac.doFinal(callConnectedPacket)
 
-        // Insert CMAC into packet
-        System.arraycopy(cmac, 0, callConnectedPacket, compoundMacOffsetInPacket, 32)
+        // Insert CMAC into packet (20B for SHA-1 leaves trailing 12B zeroed; 32B for SHA-256)
+        System.arraycopy(cmac, 0, callConnectedPacket, compoundMacOffsetInPacket, cmac.size)
         return callConnectedPacket
     }
 

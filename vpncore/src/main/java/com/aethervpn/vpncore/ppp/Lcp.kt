@@ -29,6 +29,14 @@ data class LcpPacket(
             val totalLen = ((bytes[offset + 2].toInt() and 0xFF) shl 8) or (bytes[offset + 3].toInt() and 0xFF)
             require(length >= totalLen) { "LCP packet length mismatch: expected $totalLen, got $length" }
 
+            val bodyLen = totalLen - 4
+            val rawBody = ByteArray(bodyLen)
+            System.arraycopy(bytes, offset + 4, rawBody, 0, bodyLen)
+
+            if (code == CODE_ECHO_REQUEST || code == CODE_ECHO_REPLY || code == CODE_DISCARD_REQUEST || code == CODE_CODE_REJECT || code == CODE_PROTOCOL_REJECT) {
+                return LcpPacket(code, id, emptyList(), rawData = rawBody)
+            }
+
             val options = mutableListOf<LcpOption>()
             var optOffset = offset + 4
             val endOffset = offset + totalLen
@@ -44,7 +52,7 @@ data class LcpPacket(
                 optOffset += optLen
             }
 
-            return LcpPacket(code, id, options)
+            return LcpPacket(code, id, options, rawData = rawBody)
         }
     }
 
