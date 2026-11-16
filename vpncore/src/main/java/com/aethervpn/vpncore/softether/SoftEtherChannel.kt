@@ -192,6 +192,23 @@ class SoftEtherChannel(
     }
 
     /**
+     * Send Cedar keepalive probe (block count = -1 / 0xFFFFFFFF).
+     */
+    fun sendKeepalive() {
+        val out = output ?: return
+        if (!isConnected.get()) return
+        synchronized(writeLock) {
+            try {
+                txBuffer.clear()
+                txBuffer.putInt(-1)
+                txBuffer.flip()
+                out.write(txBuffer.array(), 0, txBuffer.limit())
+                out.flush()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
      * Read loop that continuously reads Ethernet frames from the server and delivers them.
      */
     suspend fun readLoop(onFrameReceived: (ByteArray) -> Unit) = withContext(Dispatchers.IO) {

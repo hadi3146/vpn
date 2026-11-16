@@ -1371,6 +1371,11 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                             override fun onIpPacketReceived(packet: ByteArray, length: Int) {
                                 onDataPacketReceived(packet, 0, length)
                             }
+
+                            override fun onBytesTransferred(txBytesDelta: Long, rxBytesDelta: Long) {
+                                totalTxBytes.addAndGet(txBytesDelta)
+                                totalRxBytes.addAndGet(rxBytesDelta)
+                            }
                         }
                     )
                     client.setProbeInterceptor { packet -> interceptProbeDnsReply(packet) }
@@ -1529,7 +1534,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
             delay(100)
             val (httpReachable, telegramReachable, instagramReachable) = coroutineScope {
                 val httpJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(2500L) {
+                    withTimeoutOrNull(4000L) {
                         val probeUrls = listOf(
                             "http://connectivitycheck.gstatic.com/generate_204",
                             "https://1.1.1.1/cdn-cgi/trace"
@@ -1546,7 +1551,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                 }
 
                 val telegramJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(2500L) {
+                    withTimeoutOrNull(4000L) {
                         val telegramEndpoints = listOf(
                             java.net.InetSocketAddress("149.154.167.50", 443),
                             java.net.InetSocketAddress("149.154.167.91", 443),
@@ -1557,7 +1562,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                         for (endpoint in telegramEndpoints) {
                             try {
                                 java.net.Socket().use { s ->
-                                    s.connect(endpoint, 1800)
+                                    s.connect(endpoint, 3000)
                                     return@withTimeoutOrNull true
                                 }
                             } catch (_: Exception) {}
@@ -1567,7 +1572,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                 }
 
                 val instagramJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(2500L) {
+                    withTimeoutOrNull(4000L) {
                         val instagramEndpoints = listOf(
                             java.net.InetSocketAddress("157.240.241.63", 443),
                             java.net.InetSocketAddress("157.240.1.63", 443),
@@ -1576,7 +1581,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                         for (endpoint in instagramEndpoints) {
                             try {
                                 java.net.Socket().use { s ->
-                                    s.connect(endpoint, 1800)
+                                    s.connect(endpoint, 3000)
                                     return@withTimeoutOrNull true
                                 }
                             } catch (_: Exception) {}
