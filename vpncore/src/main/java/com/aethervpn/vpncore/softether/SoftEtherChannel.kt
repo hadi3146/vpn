@@ -4,6 +4,8 @@ import com.aethervpn.vpncore.transport.SniBypassSocketFactory
 import com.aethervpn.vpncore.transport.SniStrategy
 import com.aethervpn.vpncore.transport.SocketProtector
 import com.aethervpn.vpncore.transport.SstpTransport
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -70,8 +72,8 @@ class SoftEtherChannel(
             timeoutMs = connectTimeoutMs
         )
         transport = t
-        input = t.inputStream
-        output = t.outputStream
+        input = BufferedInputStream(t.inputStream, 65536)
+        output = BufferedOutputStream(t.outputStream, 65536)
 
         val inStream = input ?: throw IllegalStateException("Input stream unavailable")
         val outStream = output ?: throw IllegalStateException("Output stream unavailable")

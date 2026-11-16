@@ -69,5 +69,35 @@ object SoftEtherFrame {
         System.arraycopy(frame, ETHERNET_HEADER_SIZE, ipPacket, 0, ipPayloadLen)
         return ipPacket
     }
+
+    /**
+     * Compute a 5-tuple flow hash for an IPv4 packet to ensure packets belonging to the
+     * same TCP/UDP connection are pinned to the same channel, avoiding TCP packet reordering.
+     */
+    fun computeFlowHash(ipPacket: ByteArray, length: Int): Int {
+        if (length < 20) return 0
+        val version = (ipPacket[0].toInt() and 0xF0) ushr 4
+        if (version != 4) return 0
+
+        val proto = ipPacket[9].toInt() and 0xFF
+        val srcIp = (((ipPacket[12].toInt() and 0xFF) shl 24) or
+                ((ipPacket[13].toInt() and 0xFF) shl 16) or
+                ((ipPacket[14].toInt() and 0xFF) shl 8) or
+                (ipPacket[15].toInt() and 0xFF))
+        val dstIp = (((ipPacket[16].toInt() and 0xFF) shl 24) or
+                ((ipPacket[17].toInt() and 0xFF) shl 16) or
+                ((ipPacket[18].toInt() and 0xFF) shl 8) or
+                (ipPacket[19].toInt() and 0xFF))
+
+        var hash = (srcIp * 31 + dstIp) * 31 + proto
+        val ihl = (ipPacket[0].toInt() and 0x0F) * 4
+        if ((proto == 6 || proto == 17) && length >= ihl + 4) { // TCP or UDP
+            val srcPort = (((ipPacket[ihl].toInt() and 0xFF) shl 8) or (ipPacket[ihl + 1].toInt() and 0xFF))
+            val dstPort = (((ipPacket[ihl + 2].toInt() and 0xFF) shl 8) or (ipPacket[ihl + 3].toInt() and 0xFF))
+            hash = (hash * 31 + srcPort) * 31 + dstPort
+        }
+        hash = hash xor (hash ushr 16)
+        return hash
+    }
 }
 

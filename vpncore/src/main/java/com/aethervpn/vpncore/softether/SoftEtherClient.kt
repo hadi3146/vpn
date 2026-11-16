@@ -65,6 +65,7 @@ interface SoftEtherEventListener {
     fun onError(e: Exception)
     fun onIpPacketReceived(packet: ByteArray, length: Int)
     fun onBytesTransferred(txBytesDelta: Long, rxBytesDelta: Long) {}
+    fun onLog(message: String) {}
 }
 
 /**
@@ -203,7 +204,7 @@ class SoftEtherClient(
                 netmask = dhcpConfig.netmask,
                 gateway = dhcpConfig.gateway,
                 dnsServers = dhcpConfig.dnsServers,
-                mtu = 1400,
+                mtu = 1500,
                 activeChannels = channels.count { it.isConnected.get() }
             )
 
@@ -257,18 +258,21 @@ class SoftEtherClient(
         dhcpChannel = ch
 
         try {
-            val discoverFrame = SoftEtherDhcp.buildDiscoverFrame(clientMac, xid)
-            sendFrameBroadcast(discoverFrame)
+            var offer: SoftEtherDhcp.DhcpOffer? = null
+            for (attempt in 1..2) {
+                val discoverFrame = SoftEtherDhcp.buildDiscoverFrame(clientMac, xid)
+                sendFrameBroadcast(discoverFrame)
 
-            // Wait for DHCP Offer
-            val offer = withTimeoutOrNull(1500L) {
-                while (true) {
-                    val (msgType, offerData) = ch.receive()
-                    if (msgType == SoftEtherDhcp.DHCP_OFFER) {
-                        return@withTimeoutOrNull offerData
+                offer = withTimeoutOrNull(2500L) {
+                    while (true) {
+                        val (msgType, offerData) = ch.receive()
+                        if (msgType == SoftEtherDhcp.DHCP_OFFER) {
+                            return@withTimeoutOrNull offerData
+                        }
                     }
+                    null
                 }
-                null
+                if (offer != null) break
             }
 
             if (offer != null) {
@@ -282,8 +286,7 @@ class SoftEtherClient(
                 )
                 sendFrameBroadcast(requestFrame)
 
-                // Wait for DHCP Ack
-                val ack = withTimeoutOrNull(1500L) {
+                val ack = withTimeoutOrNull(2500L) {
                     while (true) {
                         val (msgType, ackData) = ch.receive()
                         if (msgType == SoftEtherDhcp.DHCP_ACK) {
@@ -296,17 +299,20 @@ class SoftEtherClient(
                 if (ack != null) {
                     gatewayMac = ack.serverMac
                     val clientIpStr = InetAddress.getByAddress(ack.offeredIp).hostAddress ?: "192.168.30.15"
-                    return@withContext SoftEtherDhcp.DhcpConfig(
+                    val dns = ack.dnsServers.ifEmpty { listOf("8.8.8.8", "8.8.4.4") }
+                    val conf = SoftEtherDhcp.DhcpConfig(
                         clientIp = clientIpStr,
                         netmask = ack.netmask,
                         gateway = ack.gateway,
-                        dnsServers = ack.dnsServers.ifEmpty { listOf("8.8.8.8", "8.8.4.4") },
+                        dnsServers = dns,
                         serverMac = ack.serverMac
                     )
+                    listener.onLog("SoftEther DHCP success: IP=$clientIpStr, Gateway=${ack.gateway}, DNS=$dns")
+                    return@withContext conf
                 }
             }
-        } catch (_: Exception) {
-            // DHCP timed out or failed, fall through to static fallback
+        } catch (e: Exception) {
+            listener.onLog("SoftEther DHCP notice: ${e.message ?: "timeout"}")
         } finally {
             pendingDhcpXid = 0
             dhcpChannel = null
@@ -314,6 +320,8 @@ class SoftEtherClient(
 
         // Fallback: Virtual NAT standard configuration
         val fallback = SoftEtherDhcp.defaultFallbackConfig(clientMac)
+        gatewayMac = fallback.serverMac
+        listener.onLog("SoftEther using Virtual NAT configuration: IP=${fallback.clientIp}, Gateway=${fallback.gateway}")
         sendArpDiscovery(fallback.gateway, fallback.clientIp)
         fallback
     }
@@ -367,34 +375,55 @@ class SoftEtherClient(
 
         val senderMac = ByteArray(6)
         System.arraycopy(frame, 22, senderMac, 0, 6)
-        gatewayMac = senderMac
+        val senderIp = ByteArray(4)
+        System.arraycopy(frame, 28, senderIp, 0, 4)
 
-        // If opcode == 1 (ARP Request), answer with our client MAC
-        if (opcode == 1) {
-            val reply = ByteArray(42)
-            // Ethernet header: Dst MAC (senderMac), Src MAC (clientMac), EtherType (0x0806)
-            System.arraycopy(senderMac, 0, reply, 0, 6)
-            System.arraycopy(clientMac, 0, reply, 6, 6)
-            reply[12] = 0x08.toByte()
-            reply[13] = 0x06.toByte()
+        val currentGateway = acquiredDhcp?.gateway ?: "192.168.30.1"
+        val currentClientIp = acquiredDhcp?.clientIp ?: "192.168.30.15"
+        val myGatewayIpBytes = try { InetAddress.getByName(currentGateway).address } catch (_: Exception) { null }
+        val myClientIpBytes = try { InetAddress.getByName(currentClientIp).address } catch (_: Exception) { null }
 
-            // ARP header: hwType=1, proto=0x0800, hwSize=6, protoSize=4, opcode=2 (Reply)
-            reply[14] = 0x00; reply[15] = 0x01
-            reply[16] = 0x08; reply[17] = 0x00
-            reply[18] = 0x06; reply[19] = 0x04
-            reply[20] = 0x00; reply[21] = 0x02
+        // 1. Learn/update Gateway MAC ONLY if sender IP is our Gateway IP
+        if (myGatewayIpBytes != null && senderIp.contentEquals(myGatewayIpBytes)) {
+            val oldMac = gatewayMac
+            gatewayMac = senderMac
+            if (!oldMac.contentEquals(senderMac)) {
+                val macStr = senderMac.joinToString(":") { "%02X".format(it) }
+                listener.onLog("Learned Gateway MAC for $currentGateway: $macStr")
+            }
+        }
 
-            // Sender MAC: clientMac
-            System.arraycopy(clientMac, 0, reply, 22, 6)
-            // Sender IP: target IP from request (frame[38..41])
-            System.arraycopy(frame, 38, reply, 28, 4)
+        // 2. Reply to ARP Request ONLY if the target IP is OUR assigned IP
+        if (opcode == 1 && myClientIpBytes != null) {
+            val targetIp = ByteArray(4)
+            System.arraycopy(frame, 38, targetIp, 0, 4)
 
-            // Target MAC: senderMac
-            System.arraycopy(senderMac, 0, reply, 32, 6)
-            // Target IP: sender IP from request (frame[28..31])
-            System.arraycopy(frame, 28, reply, 38, 4)
+            if (targetIp.contentEquals(myClientIpBytes)) {
+                val reply = ByteArray(42)
+                // Ethernet header: Dst MAC (senderMac), Src MAC (clientMac), EtherType (0x0806)
+                System.arraycopy(senderMac, 0, reply, 0, 6)
+                System.arraycopy(clientMac, 0, reply, 6, 6)
+                reply[12] = 0x08.toByte()
+                reply[13] = 0x06.toByte()
 
-            sendFrameBroadcast(reply)
+                // ARP header: hwType=1, proto=0x0800, hwSize=6, protoSize=4, opcode=2 (Reply)
+                reply[14] = 0x00; reply[15] = 0x01
+                reply[16] = 0x08; reply[17] = 0x00
+                reply[18] = 0x06; reply[19] = 0x04
+                reply[20] = 0x00; reply[21] = 0x02
+
+                // Sender MAC: clientMac
+                System.arraycopy(clientMac, 0, reply, 22, 6)
+                // Sender IP: myClientIpBytes
+                System.arraycopy(myClientIpBytes, 0, reply, 28, 4)
+
+                // Target MAC: senderMac
+                System.arraycopy(senderMac, 0, reply, 32, 6)
+                // Target IP: senderIp
+                System.arraycopy(senderIp, 0, reply, 38, 4)
+
+                sendFrameBroadcast(reply)
+            }
         }
     }
 
@@ -454,7 +483,8 @@ class SoftEtherClient(
             )
 
             val count = activeList.size
-            val startIdx = Math.abs(txChannelIndex.getAndIncrement()) % count
+            val flowHash = SoftEtherFrame.computeFlowHash(packet, length)
+            val startIdx = if (flowHash != 0) Math.abs(flowHash) % count else Math.abs(txChannelIndex.getAndIncrement()) % count
             for (i in 0 until count) {
                 val ch = activeList[(startIdx + i) % count]
                 if (ch.sendEthernetFrame(frame)) {

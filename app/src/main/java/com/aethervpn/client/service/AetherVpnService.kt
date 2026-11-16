@@ -1376,6 +1376,10 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                                 totalTxBytes.addAndGet(txBytesDelta)
                                 totalRxBytes.addAndGet(rxBytesDelta)
                             }
+
+                            override fun onLog(message: String) {
+                                VpnStateHolder.log(message)
+                            }
                         }
                     )
                     client.setProbeInterceptor { packet -> interceptProbeDnsReply(packet) }
