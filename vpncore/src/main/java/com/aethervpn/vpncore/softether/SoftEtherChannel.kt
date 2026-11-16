@@ -202,7 +202,7 @@ class SoftEtherChannel(
     }
 
     /**
-     * Send Cedar keepalive probe (block count = -1 / 0xFFFFFFFF).
+     * Send Cedar keepalive probe (block count = 0).
      */
     fun sendKeepalive() {
         val out = output ?: return
@@ -210,7 +210,7 @@ class SoftEtherChannel(
         synchronized(writeLock) {
             try {
                 txBuffer.clear()
-                txBuffer.putInt(-1)
+                txBuffer.putInt(0)
                 txBuffer.flip()
                 out.write(txBuffer.array(), 0, txBuffer.limit())
                 out.flush()

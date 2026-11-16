@@ -75,5 +75,47 @@ class SoftEtherFrameTest {
         assertEquals("192.168.30.1", fallback.gateway)
         assertTrue(fallback.dnsServers.contains("8.8.8.8"))
     }
+
+    @Test
+    fun testDestinationMacMatching() {
+        val myMac = byteArrayOf(0x00, 0xAC.toByte(), 0x11, 0x22, 0x33, 0x44)
+        val otherMac = byteArrayOf(0x00, 0xAC.toByte(), 0x55, 0x66, 0x77, 0x88.toByte())
+        val broadcastMac = SoftEtherFrame.BROADCAST_MAC
+        val multicastMac = byteArrayOf(0x01, 0x00, 0x5E.toByte(), 0x00, 0x00, 0x01)
+
+        val frameUnicastToMe = ByteArray(20).apply { System.arraycopy(myMac, 0, this, 0, 6) }
+        val frameUnicastToOther = ByteArray(20).apply { System.arraycopy(otherMac, 0, this, 0, 6) }
+        val frameBroadcast = ByteArray(20).apply { System.arraycopy(broadcastMac, 0, this, 0, 6) }
+        val frameMulticast = ByteArray(20).apply { System.arraycopy(multicastMac, 0, this, 0, 6) }
+
+        assertTrue(SoftEtherFrame.isMatchingDestinationMac(frameUnicastToMe, myMac))
+        assertTrue(SoftEtherFrame.isMatchingDestinationMac(frameBroadcast, myMac))
+        assertTrue(SoftEtherFrame.isMatchingDestinationMac(frameMulticast, myMac))
+        org.junit.Assert.assertFalse(SoftEtherFrame.isMatchingDestinationMac(frameUnicastToOther, myMac))
+    }
+
+    @Test
+    fun testUnwrapTrimsEthernetPadding() {
+        val myMac = byteArrayOf(0x00, 0xAC.toByte(), 0x11, 0x22, 0x33, 0x44)
+        val routerMac = byteArrayOf(0x00, 0xAC.toByte(), 0x01, 0x02, 0x03, 0x04)
+
+        // 28-byte IP packet (e.g. TCP ACK) padded to 60 bytes on Ethernet wire
+        val rawIp = ByteArray(28) { 0 }
+        rawIp[0] = 0x45.toByte()
+        rawIp[2] = 0x00 // Total length = 28
+        rawIp[3] = 28
+
+        val paddedFrame = ByteArray(14 + 60)
+        System.arraycopy(myMac, 0, paddedFrame, 0, 6)
+        System.arraycopy(routerMac, 0, paddedFrame, 6, 6)
+        paddedFrame[12] = 0x08.toByte()
+        paddedFrame[13] = 0x00.toByte()
+        System.arraycopy(rawIp, 0, paddedFrame, 14, 28) // Remaining 32 bytes are 0x00 padding
+
+        val extracted = SoftEtherFrame.unwrapIpv4Payload(paddedFrame, paddedFrame.size)
+        assertNotNull(extracted)
+        assertEquals(28, extracted!!.size)
+        assertEquals(28, extracted[3].toInt())
+    }
 }
 

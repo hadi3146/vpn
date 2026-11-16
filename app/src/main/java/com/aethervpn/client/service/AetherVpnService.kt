@@ -1288,7 +1288,8 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                         sniStrategy = strategy,
                         customSni = customSniOverride,
                         strictCert = settings.strictCert,
-                        connectTimeoutMs = connectTimeoutMs
+                        connectTimeoutMs = connectTimeoutMs,
+                        mtu = effectiveMtu
                     )
 
                     val client = SoftEtherClient(
