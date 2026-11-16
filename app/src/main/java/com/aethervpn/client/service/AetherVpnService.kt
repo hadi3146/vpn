@@ -1534,59 +1534,73 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
             delay(100)
             val (httpReachable, telegramReachable, instagramReachable) = coroutineScope {
                 val httpJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(4000L) {
+                    withTimeoutOrNull(5000L) {
                         val probeUrls = listOf(
                             "http://connectivitycheck.gstatic.com/generate_204",
                             "https://1.1.1.1/cdn-cgi/trace"
                         )
-                        for (url in probeUrls) {
-                            try {
-                                val req = Request.Builder().url(url).build()
-                                val code = httpClient.newCall(req).execute().use { it.code }
-                                if (code in 200..499) return@withTimeoutOrNull true
-                            } catch (_: Exception) {}
+                        coroutineScope {
+                            probeUrls.map { url ->
+                                async {
+                                    try {
+                                        val req = Request.Builder().url(url).build()
+                                        val code = httpClient.newCall(req).execute().use { it.code }
+                                        code in 200..499
+                                    } catch (_: Exception) {
+                                        false
+                                    }
+                                }
+                            }.any { it.await() }
                         }
-                        false
                     } ?: false
                 }
 
                 val telegramJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(4000L) {
+                    withTimeoutOrNull(5000L) {
                         val telegramEndpoints = listOf(
                             java.net.InetSocketAddress("149.154.167.50", 443),
                             java.net.InetSocketAddress("149.154.167.91", 443),
                             java.net.InetSocketAddress("149.154.167.92", 443),
-                            java.net.InetSocketAddress("91.108.56.165", 443),
-                            java.net.InetSocketAddress("149.154.167.91", 5222)
+                            java.net.InetSocketAddress("91.108.56.165", 443)
                         )
-                        for (endpoint in telegramEndpoints) {
-                            try {
-                                java.net.Socket().use { s ->
-                                    s.connect(endpoint, 3000)
-                                    return@withTimeoutOrNull true
+                        coroutineScope {
+                            telegramEndpoints.map { endpoint ->
+                                async {
+                                    try {
+                                        java.net.Socket().use { s ->
+                                            s.connect(endpoint, 4000)
+                                            true
+                                        }
+                                    } catch (_: Exception) {
+                                        false
+                                    }
                                 }
-                            } catch (_: Exception) {}
+                            }.any { it.await() }
                         }
-                        false
                     } ?: false
                 }
 
                 val instagramJob = async(Dispatchers.IO) {
-                    withTimeoutOrNull(4000L) {
+                    withTimeoutOrNull(5000L) {
                         val instagramEndpoints = listOf(
                             java.net.InetSocketAddress("157.240.241.63", 443),
                             java.net.InetSocketAddress("157.240.1.63", 443),
                             java.net.InetSocketAddress("31.13.72.36", 443)
                         )
-                        for (endpoint in instagramEndpoints) {
-                            try {
-                                java.net.Socket().use { s ->
-                                    s.connect(endpoint, 3000)
-                                    return@withTimeoutOrNull true
+                        coroutineScope {
+                            instagramEndpoints.map { endpoint ->
+                                async {
+                                    try {
+                                        java.net.Socket().use { s ->
+                                            s.connect(endpoint, 4000)
+                                            true
+                                        }
+                                    } catch (_: Exception) {
+                                        false
+                                    }
                                 }
-                            } catch (_: Exception) {}
+                            }.any { it.await() }
                         }
-                        false
                     } ?: false
                 }
 
@@ -1594,12 +1608,6 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
             }
 
             VpnStateHolder.log("Tunnel verification: HTTP=$httpReachable, TG=$telegramReachable, IG=$instagramReachable")
-
-            // Strict social routing check: if both Telegram and Instagram are blocked, failover to unblocked node
-            if (!telegramReachable && !instagramReachable) {
-                VpnStateHolder.log("Tunnel blocks both Telegram & Instagram; failing over to unblocked node...")
-                return false
-            }
 
             if (httpReachable || telegramReachable || instagramReachable) {
                 VpnStateHolder.log("Connectivity verified (TG=$telegramReachable, IG=$instagramReachable, HTTP=$httpReachable).")
@@ -1688,17 +1696,24 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
     private suspend fun isSocialAppReachable(): Boolean = withContext(Dispatchers.IO) {
         val endpoints = listOf(
             java.net.InetSocketAddress("149.154.167.91", 443),
-            java.net.InetSocketAddress("157.240.241.63", 443)
+            java.net.InetSocketAddress("157.240.241.63", 443),
+            java.net.InetSocketAddress("1.1.1.1", 443),
+            java.net.InetSocketAddress("8.8.8.8", 53)
         )
-        for (ep in endpoints) {
-            try {
-                java.net.Socket().use { s ->
-                    s.connect(ep, 1600)
-                    return@withContext true
+        coroutineScope {
+            endpoints.map { ep ->
+                async {
+                    try {
+                        java.net.Socket().use { s ->
+                            s.connect(ep, 4000)
+                            true
+                        }
+                    } catch (_: Exception) {
+                        false
+                    }
                 }
-            } catch (_: Exception) {}
+            }.any { it.await() }
         }
-        false
     }
 
     private fun startTrafficWatchdog(
