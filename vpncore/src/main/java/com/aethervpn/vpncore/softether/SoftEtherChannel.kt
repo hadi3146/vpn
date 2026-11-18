@@ -44,6 +44,7 @@ class SoftEtherChannel(
 
     private val writeLock = Any()
     private val txBuffer = ByteBuffer.allocate(65536).apply { order(ByteOrder.BIG_ENDIAN) }
+    private val rxFrameBuf = ByteArray(65536)
 
     suspend fun connectAndHandshake(
         username: String,
@@ -72,8 +73,8 @@ class SoftEtherChannel(
             timeoutMs = connectTimeoutMs
         )
         transport = t
-        input = BufferedInputStream(t.inputStream, 65536)
-        output = BufferedOutputStream(t.outputStream, 65536)
+        input = BufferedInputStream(t.inputStream, 524288) // 512 KB buffer for high-throughput streaming
+        output = t.outputStream
 
         val inStream = input ?: throw IllegalStateException("Input stream unavailable")
         val outStream = output ?: throw IllegalStateException("Output stream unavailable")
@@ -145,6 +146,8 @@ class SoftEtherChannel(
                 ?: ByteArray(20).apply { SecureRandom().nextBytes(this) }
             val serverMaxConn = welcomePack.intProperties[SoftEtherConstants.SEP_MAX_CONNECTION] ?: targetConnections
 
+            try { t.setSoTimeout(0) } catch (_: Exception) {}
+            try { t.setTcpNoDelay(true) } catch (_: Exception) {}
             isConnected.set(true)
             SoftEtherSessionInfo(sessionKey = sessionKey, maxConnections = serverMaxConn)
         } else {
@@ -168,25 +171,40 @@ class SoftEtherChannel(
                 throw IllegalStateException("SoftEther additional_connect returned HTTP ${addResponse.statusCode}")
             }
 
+            try { t.setSoTimeout(0) } catch (_: Exception) {}
+            try { t.setTcpNoDelay(true) } catch (_: Exception) {}
             isConnected.set(true)
             SoftEtherSessionInfo(sessionKey = sessionKey, maxConnections = targetConnections)
         }
     }
 
     /**
-     * Transmit a single Ethernet frame over this channel.
-     * Returns true if frame was successfully written, or false if channel write failed / disconnected.
+     * Transmit an IPv4 packet as an Ethernet frame directly into the tx buffer with zero allocations.
+     * Encapsulates dstMac, srcMac, EtherType (0x0800), and payload in one contiguous write.
      */
-    fun sendEthernetFrame(frame: ByteArray): Boolean {
+    fun sendIpPacketAsFrame(
+        srcMac: ByteArray,
+        dstMac: ByteArray,
+        ipPacket: ByteArray,
+        offset: Int,
+        length: Int
+    ): Boolean {
         val out = output ?: return false
         if (!isConnected.get()) return false
 
+        val frameLen = 14 + length
         return synchronized(writeLock) {
             try {
                 txBuffer.clear()
                 txBuffer.putInt(1) // 1 frame
-                txBuffer.putInt(frame.size)
-                txBuffer.put(frame)
+                txBuffer.putInt(frameLen)
+                // Ethernet Header (14 bytes)
+                txBuffer.put(dstMac, 0, 6)
+                txBuffer.put(srcMac, 0, 6)
+                txBuffer.put(0x08.toByte())
+                txBuffer.put(0x00.toByte())
+                // IP Payload
+                txBuffer.put(ipPacket, offset, length)
                 txBuffer.flip()
 
                 out.write(txBuffer.array(), 0, txBuffer.limit())
@@ -194,6 +212,36 @@ class SoftEtherChannel(
                 txBytes.addAndGet(txBuffer.limit().toLong())
                 true
             } catch (e: Exception) {
+                android.util.Log.e("SoftEtherChannel", "Channel $channelId sendIpPacketAsFrame failed: ${e.message}", e)
+                isConnected.set(false)
+                close()
+                false
+            }
+        }
+    }
+
+    /**
+     * Transmit a single raw Ethernet frame over this channel (e.g. ARP or DHCP).
+     * Returns true if frame was successfully written, or false if channel write failed / disconnected.
+     */
+    fun sendEthernetFrame(frame: ByteArray, offset: Int = 0, length: Int = frame.size): Boolean {
+        val out = output ?: return false
+        if (!isConnected.get()) return false
+
+        return synchronized(writeLock) {
+            try {
+                txBuffer.clear()
+                txBuffer.putInt(1) // 1 frame
+                txBuffer.putInt(length)
+                txBuffer.put(frame, offset, length)
+                txBuffer.flip()
+
+                out.write(txBuffer.array(), 0, txBuffer.limit())
+                out.flush()
+                txBytes.addAndGet(txBuffer.limit().toLong())
+                true
+            } catch (e: Exception) {
+                android.util.Log.e("SoftEtherChannel", "Channel $channelId sendEthernetFrame failed: ${e.message}", e)
                 isConnected.set(false)
                 close()
                 false
@@ -214,7 +262,8 @@ class SoftEtherChannel(
                 txBuffer.flip()
                 out.write(txBuffer.array(), 0, txBuffer.limit())
                 out.flush()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.e("SoftEtherChannel", "Channel $channelId sendKeepalive failed: ${e.message}", e)
                 isConnected.set(false)
                 close()
             }
@@ -222,16 +271,25 @@ class SoftEtherChannel(
     }
 
     /**
-     * Read loop that continuously reads Ethernet frames from the server and delivers them.
+     * Read loop that continuously reads Ethernet frames from the server into reusable buffer
+     * and delivers them with zero allocations.
      */
-    suspend fun readLoop(onFrameReceived: (ByteArray) -> Unit) = withContext(Dispatchers.IO) {
+    suspend fun readLoop(onFrameReceived: (buffer: ByteArray, offset: Int, length: Int) -> Unit) = withContext(Dispatchers.IO) {
         val inStream = input ?: return@withContext
-        val headerBuf = ByteArray(8)
+        val headerBuf = ByteArray(4)
 
         try {
             while (isActive && isConnected.get()) {
                 // Read 4 bytes: number of frames in block
-                if (!readFully(inStream, headerBuf, 0, 4)) break
+                val numFramesOk = try {
+                    readFully(inStream, headerBuf, 0, 4)
+                } catch (_: java.net.SocketTimeoutException) {
+                    continue
+                }
+                if (!numFramesOk) {
+                    android.util.Log.w("SoftEtherChannel", "Channel $channelId readLoop EOF on numFrames")
+                    break
+                }
                 val numFrames = (((headerBuf[0].toInt() and 0xFF) shl 24) or
                         ((headerBuf[1].toInt() and 0xFF) shl 16) or
                         ((headerBuf[2].toInt() and 0xFF) shl 8) or
@@ -243,27 +301,42 @@ class SoftEtherChannel(
                 }
 
                 for (i in 0 until numFrames) {
-                    if (!readFully(inStream, headerBuf, 0, 4)) break
+                    val frameLenOk = try {
+                        readFully(inStream, headerBuf, 0, 4)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        continue
+                    }
+                    if (!frameLenOk) {
+                        android.util.Log.w("SoftEtherChannel", "Channel $channelId readLoop EOF on frameLen")
+                        break
+                    }
                     val frameLen = (((headerBuf[0].toInt() and 0xFF) shl 24) or
                             ((headerBuf[1].toInt() and 0xFF) shl 16) or
                             ((headerBuf[2].toInt() and 0xFF) shl 8) or
                             (headerBuf[3].toInt() and 0xFF))
 
                     if (frameLen in 14..65535) {
-                        val frameData = ByteArray(frameLen)
-                        if (readFully(inStream, frameData, 0, frameLen)) {
+                        val frameReadOk = try {
+                            readFully(inStream, rxFrameBuf, 0, frameLen)
+                        } catch (_: java.net.SocketTimeoutException) {
+                            continue
+                        }
+                        if (frameReadOk) {
                             rxBytes.addAndGet(frameLen.toLong())
-                            onFrameReceived(frameData)
+                            onFrameReceived(rxFrameBuf, 0, frameLen)
                         } else {
+                            android.util.Log.w("SoftEtherChannel", "Channel $channelId readLoop EOF on frameData len=$frameLen")
                             break
                         }
                     }
                 }
             }
-        } catch (_: CancellationException) {
+        } catch (_: java.net.SocketTimeoutException) {
+            // Socket timeout during idle - normal
+        } catch (e: CancellationException) {
             // Normal shutdown
-        } catch (_: Exception) {
-            // Socket disconnected
+        } catch (e: Exception) {
+            android.util.Log.e("SoftEtherChannel", "Channel $channelId readLoop exception: ${e.message}", e)
         } finally {
             close()
         }

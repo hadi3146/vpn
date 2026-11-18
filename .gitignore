@@ -15,4 +15,6 @@ keystore.properties
 *.jks
 *.keystore
 vpngate-mirrors/
+.vscode/
+.tmp.driveupload/
 

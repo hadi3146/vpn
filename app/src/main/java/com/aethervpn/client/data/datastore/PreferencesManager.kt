@@ -47,7 +47,7 @@ enum class VpnProtocol(val id: Int, val displayName: String) {
 
 data class UserSettings(
     val vpnProtocol: VpnProtocol = VpnProtocol.SSTP,
-    val softEtherConnections: Int = 8,
+    val softEtherConnections: Int = 2,
     val warpAccountJson: String = "",
     val warpCleanEndpoint: String = "",
     val warpPort: Int = 2408,
@@ -110,7 +110,7 @@ class PreferencesManager(private val context: Context) {
     val settingsFlow: Flow<UserSettings> = context.dataStore.data.map { pref ->
         UserSettings(
             vpnProtocol = VpnProtocol.fromId(pref[Keys.VPN_PROTOCOL] ?: 0),
-            softEtherConnections = (pref[Keys.SOFTETHER_CONNECTIONS] ?: 8).coerceIn(1, 16),
+            softEtherConnections = (pref[Keys.SOFTETHER_CONNECTIONS] ?: 2).let { if (it == 8) 2 else it }.coerceIn(1, 16),
             warpAccountJson = pref[Keys.WARP_ACCOUNT_JSON] ?: "",
             warpCleanEndpoint = pref[Keys.WARP_CLEAN_ENDPOINT] ?: "",
             warpPort = pref[Keys.WARP_PORT] ?: 2408,

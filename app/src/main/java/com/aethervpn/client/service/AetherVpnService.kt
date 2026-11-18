@@ -117,9 +117,9 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
         private const val DIRECT_SSTP_FIRST_TIMEOUT_MS = 2200
         private const val FAILOVER_HANDSHAKE_TIMEOUT_MS = 5500
         private const val DIRECT_DNS_TIMEOUT_MS = 1200
-        private const val WATCHDOG_INTERVAL_MS = 8_000L
-        private const val STALL_TX_THRESHOLD = 15L
-        private const val STALL_CONSECUTIVE_LIMIT = 2
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
+        private const val STALL_TX_THRESHOLD = 50L
+        private const val STALL_CONSECUTIVE_LIMIT = 3
         private const val DNS_BUCKET_DIRECT = 1
         private const val DNS_BUCKET_TUNNEL = 2
 
@@ -190,7 +190,7 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
         val isIranDomain: Boolean
     )
 
-    private val dnsCache = DnsResponseCache(maxEntries = 1024, maxTtlSec = 600L)
+    private val dnsCache = DnsResponseCache(maxEntries = 1024, maxTtlSec = 1800L)
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val isRunning = AtomicBoolean(false)
@@ -1369,8 +1369,8 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                                 VpnStateHolder.log("SoftEther error: $msg")
                             }
 
-                            override fun onIpPacketReceived(packet: ByteArray, length: Int) {
-                                onDataPacketReceived(packet, 0, length)
+                            override fun onIpPacketReceived(packet: ByteArray, offset: Int, length: Int) {
+                                onDataPacketReceived(packet, offset, length)
                             }
 
                             override fun onBytesTransferred(txBytesDelta: Long, rxBytesDelta: Long) {
@@ -1700,17 +1700,19 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
 
     private suspend fun isSocialAppReachable(): Boolean = withContext(Dispatchers.IO) {
         val endpoints = listOf(
+            java.net.InetSocketAddress("1.1.1.1", 80),
+            java.net.InetSocketAddress("8.8.8.8", 53),
             java.net.InetSocketAddress("149.154.167.91", 443),
             java.net.InetSocketAddress("157.240.241.63", 443),
-            java.net.InetSocketAddress("1.1.1.1", 443),
-            java.net.InetSocketAddress("8.8.8.8", 53)
+            java.net.InetSocketAddress("91.108.4.1", 443),    // Telegram DC1
+            java.net.InetSocketAddress("149.154.167.1", 443)  // Telegram DC5
         )
         coroutineScope {
             endpoints.map { ep ->
                 async {
                     try {
                         java.net.Socket().use { s ->
-                            s.connect(ep, 4000)
+                            s.connect(ep, 6000)
                             true
                         }
                     } catch (_: Exception) {
@@ -1738,7 +1740,8 @@ class AetherVpnService : VpnService(), SstpEventListener, SocketProtector {
                 val rxDelta = snap.rxUnicastPackets - lastSnap.rxUnicastPackets
                 lastSnap = snap
 
-                if (txDelta >= STALL_TX_THRESHOLD && rxDelta <= 1L) {
+                val effectiveStallThreshold = if (activeTunnelClient is SoftEtherClient) STALL_TX_THRESHOLD * 2 else STALL_TX_THRESHOLD
+                if (txDelta >= effectiveStallThreshold && rxDelta <= 1L) {
                     stalledCycles++
                     if (stalledCycles >= STALL_CONSECUTIVE_LIMIT) {
                         if (isRunning.get() && activeGeneration == generation) {

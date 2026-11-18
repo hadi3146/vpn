@@ -70,6 +70,8 @@ object SoftEtherDhcp {
             options = { buf ->
                 // Option 53: DHCP Discover
                 buf.put(OPT_MESSAGE_TYPE).put(1).put(DHCP_DISCOVER)
+                // Option 61: Client Identifier (1 byte hwType=1, 6 bytes MAC)
+                buf.put(61.toByte()).put(7.toByte()).put(1.toByte()).put(clientMac)
                 // Option 55: Parameter Request List (Subnet, Router, DNS)
                 buf.put(OPT_PARAMETER_REQUEST_LIST).put(3)
                 buf.put(OPT_SUBNET_MASK).put(OPT_ROUTER).put(OPT_DNS_SERVERS)
@@ -105,6 +107,8 @@ object SoftEtherDhcp {
             options = { buf ->
                 // Option 53: DHCP Request
                 buf.put(OPT_MESSAGE_TYPE).put(1).put(DHCP_REQUEST)
+                // Option 61: Client Identifier (1 byte hwType=1, 6 bytes MAC)
+                buf.put(61.toByte()).put(7.toByte()).put(1.toByte()).put(clientMac)
                 // Option 50: Requested IP
                 buf.put(OPT_REQUESTED_IP).put(4).put(requestedIp)
                 // Option 54: Server Identifier

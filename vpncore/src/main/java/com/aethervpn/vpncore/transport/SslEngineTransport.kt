@@ -14,6 +14,7 @@ interface SstpTransport {
     val inputStream: InputStream
     val outputStream: OutputStream
     fun setSoTimeout(timeoutMs: Int)
+    fun setTcpNoDelay(enable: Boolean) {}
     fun close()
 }
 
@@ -246,6 +247,10 @@ class SslEngineTransport(
 
     override fun setSoTimeout(timeoutMs: Int) {
         socket.soTimeout = timeoutMs
+    }
+
+    override fun setTcpNoDelay(enable: Boolean) {
+        socket.tcpNoDelay = enable
     }
 
     override fun close() {

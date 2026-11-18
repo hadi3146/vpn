@@ -141,3 +141,97 @@ Deep Packet Inspection (DPI) censorship middleboxes monitor the unencrypted `Ser
    - Primary: Cloudflare (`1.1.1.1`), Google (`8.8.8.8`), Quad9 (`9.9.9.9`), AdGuard (`94.140.14.14`).
    - Responses are cached in `DnsResponseCache` with strict TTL compliance and LRU eviction.
 4. In **Split DNS Mode**, Iranian domains (`.ir`) and domestic services are excluded from the tunnel and resolved natively through the physical network interface (`SocketProtector.protect()`), ensuring high speed and zero bank/tax portal blockages.
+
+---
+
+## 6. SoftEther Native Multi-TCP Protocol Engine (`Proto_VPN.c` / Cedar)
+
+Radin VPN implements a pure userspace client for SoftEther's proprietary native protocol, delivering high throughput via multi-connection TCP bonding and Layer-2 Ethernet emulation over virtual switches.
+
+### Step 1: Handshake Watermark Signature
+Every TCP/TLS channel begins with an HTTP POST request targeting `/vpn/connect.cgi`:
+```http
+POST /vpn/connect.cgi HTTP/1.1\r\n
+Host: <hostname-or-ip>\r\n
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n
+Content-Type: image/jpeg\r\n
+Content-Length: 64\r\n
+Connection: Keep-Alive\r\n
+Keep-Alive: timeout=15, max=100\r\n
+\r\n
+<64-byte VPNCONNECT signature binary body>
+```
+The server verifies the `VPNCONNECT` magic signature and responds with `HTTP 200 OK` containing a serialized `SoftEtherPack` with a 20-byte pseudo-random server challenge (`random`).
+
+### Step 2: SoftEther Pack Wire Format
+SoftEther encodes all RPC messages in a binary Key-Value structure:
+- **Element Count (4 bytes, Big-Endian)**: Total number of named elements in the pack.
+- **For Each Element**:
+  - Name Length (1 byte) + Name ASCII string (null-terminated).
+  - Type (4 bytes):
+    - `0`: Int (4-byte signed Big-Endian)
+    - `1`: Data / Bytes (4-byte length + raw bytes)
+    - `2`: String (4-byte length + ASCII string)
+    - `3`: WideString / UTF-16
+    - `4`: Int64 (8-byte signed Big-Endian)
+  - Number of Values (4 bytes): Allows array properties.
+  - Value data payloads.
+
+### Step 3: Session Authentication (`method = "login"`)
+The Primary Channel (Channel 0) issues a `POST /vpn/vpn.cgi` request containing an encoded `SoftEtherPack`:
+- `method`: `"login"`
+- `hubname`: Virtual Hub name (default: `"VPNGATE"`)
+- `username`: Client username (default: `"vpn"`)
+- `auth_type`: `1` (Password Authentication)
+- `secure_password`: Derived password hash:
+  $$\text{Hash} = \text{SHA0}(\text{MD4}(\text{password}) \mathbin{\Vert} \text{ServerRandomChallenge})$$
+- `max_connection`: Target concurrent TCP channels requested by client (default: `2`).
+
+The server responds with a welcome pack containing:
+- `session_key`: 20-byte unique session identifier used by secondary channels.
+- `max_connection`: Maximum bonded channels authorized by server policy.
+
+### Step 4: Multi-TCP Secondary Channel Bonding (`method = "additional_connect"`)
+To achieve bandwidth aggregation across multiple TCP connections, the client spawns secondary TCP/TLS connections concurrently:
+- Each secondary channel connects to `/vpn/connect.cgi`, performs the watermark handshake, and posts an `additional_connect` pack:
+  - `method`: `"additional_connect"`
+  - `session_key`: The 20-byte session key granted to the primary channel.
+- Once accepted (`HTTP 200 OK`), the secondary connection immediately switches from HTTP to the raw Ethernet frame multiplexer and shares the primary tunnel's Layer-2 virtual switch port.
+
+### Step 5: Multiplexed Frame Transmission & Flow Hashing
+On an established SoftEther channel, all data is exchanged as framed Ethernet blocks:
+```
++-----------------------------------+
+|  Num Frames in Block (4 bytes)    |  -> 0 = Cedar keepalive ping probe
++-----------------------------------+
+|  Frame 1 Length (4 bytes)         |
++-----------------------------------+
+|  Frame 1 Raw Ethernet II Data     |  -> 14-byte Eth Header + IP Payload
++-----------------------------------+
+|  Frame 2 Length (4 bytes)         |
++-----------------------------------+
+|  ...                              |
++-----------------------------------+
+```
+- **5-Tuple Flow Hashing**: To prevent TCP out-of-order segment arrival across bonded channels, outbound IP packets are routed using a 5-tuple hash:
+  $$\text{Hash} = \text{FlowHash}(\text{srcIp}, \text{dstIp}, \text{protocol}, \text{srcPort}, \text{dstPort})$$
+  $$\text{ChannelIndex} = (\text{Hash} \land \text{0x7FFFFFFF}) \pmod{\text{ActiveChannelsCount}}$$
+  All packets belonging to the same TCP stream consistently travel over the same physical channel.
+
+### Step 6: Virtual DHCP & RFC 826 ARP Protocol
+- **Virtual DHCP**: SoftEther's Virtual NAT/SecureNAT engine functions as a full Layer-2 DHCP server:
+  - Client generates a randomized MAC address with `0x00, 0xAC` OUI prefix.
+  - Client broadcasts a DHCP `DISCOVER` frame encapsulated in Ethernet (`FF:FF:FF:FF:FF:FF`).
+  - Includes **DHCP Option 61 (Client Identifier)** (`hwType=1, MAC`) to ensure compliance with strict Japanese and university networks.
+  - Receives `OFFER`, broadcasts `REQUEST`, and captures `ACK` with assigned IP, gateway, netmask, and DNS servers.
+- **RFC 826 ARP Engine**:
+  - Outbound ARP discovery requests are padded to 60 bytes minimum Ethernet frame length.
+  - The client automatically learns the Gateway MAC address from incoming IPv4 frames.
+  - Inbound ARP requests for the client's assigned IP receive immediate 60-byte padded ARP replies.
+
+### Step 7: Zero-Allocation Fast Path & Low-Latency Tuning
+- **Zero-Allocation TX**: `sendIpPacketAsFrame()` formats the 14-byte Ethernet header and IP packet directly inside a reusable `ByteBuffer txBuffer` without creating temporary `ByteArray` heap objects.
+- **Zero-Allocation RX**: `readLoop` delivers received frames directly as pointer slices into the Android TUN interface.
+- **`TCP_NODELAY`**: Nagle's algorithm is disabled on all channel sockets, eliminating buffering latency for real-time applications.
+- **Fast 2s Supervision**: A lightweight background supervisor inspects channel connectivity every 2 seconds and re-establishes dropped channels without disrupting active traffic.
+

@@ -42,7 +42,7 @@ data class SoftEtherConfig(
     val username: String = "vpn",
     val password: String = "vpn",
     val hubName: String = "VPNGATE",
-    val targetConnections: Int = 8,
+    val targetConnections: Int = 2,
     val sniStrategy: SniStrategy = SniStrategy.AUTO_SMART,
     val customSni: String? = null,
     val strictCert: Boolean = false,
@@ -64,7 +64,10 @@ interface SoftEtherEventListener {
     fun onConnected(params: SoftEtherVpnParameters)
     fun onDisconnected(reason: String)
     fun onError(e: Exception)
-    fun onIpPacketReceived(packet: ByteArray, length: Int)
+    fun onIpPacketReceived(packet: ByteArray, offset: Int, length: Int)
+    fun onIpPacketReceived(packet: ByteArray, length: Int) {
+        onIpPacketReceived(packet, 0, length)
+    }
     fun onBytesTransferred(txBytesDelta: Long, rxBytesDelta: Long) {}
     fun onLog(message: String) {}
 }
@@ -82,6 +85,8 @@ class SoftEtherClient(
     private var probeInterceptor: ((ByteArray) -> Boolean)? = null
 
     private val channels = CopyOnWriteArrayList<SoftEtherChannel>()
+    @Volatile
+    private var activeChannelsArray: Array<SoftEtherChannel> = emptyArray()
     private val txChannelIndex = AtomicInteger(0)
 
     val clientMac: ByteArray = SoftEtherFrame.generateClientMac()
@@ -104,6 +109,10 @@ class SoftEtherClient(
     val rxPackets = AtomicLong(0)
     val lastAnyRxMs = AtomicLong(System.currentTimeMillis())
     val lastUnicastIpRxMs = AtomicLong(System.currentTimeMillis())
+
+    private fun updateActiveChannels() {
+        activeChannelsArray = channels.filter { it.isConnected.get() }.toTypedArray()
+    }
 
     override fun setProbeInterceptor(interceptor: ((ByteArray) -> Boolean)?) {
         this.probeInterceptor = interceptor
@@ -146,10 +155,11 @@ class SoftEtherClient(
 
             sessionKey = sessionInfo.sessionKey
             channels.add(primaryChannel)
+            updateActiveChannels()
 
             // Start reading on primary channel
             scope.launch(Dispatchers.IO) {
-                primaryChannel.readLoop { frame -> handleIncomingEthernetFrame(frame) }
+                primaryChannel.readLoop { buffer, offset, length -> handleIncomingEthernetFrame(buffer, offset, length) }
             }
 
             // 2. Establish Secondary Channels (Multi-TCP bonding) in Parallel
@@ -187,9 +197,10 @@ class SoftEtherClient(
                                     existingSessionKey = sessionKey
                                 )
                                 channels.add(ch)
+                                updateActiveChannels()
 
                                 scope.launch(Dispatchers.IO) {
-                                    ch.readLoop { frame -> handleIncomingEthernetFrame(frame) }
+                                    ch.readLoop { buffer, offset, length -> handleIncomingEthernetFrame(buffer, offset, length) }
                                 }
                             } catch (_: Exception) {
                                 // If an additional channel fails, continue with established channels
@@ -225,14 +236,14 @@ class SoftEtherClient(
 
             // 4. Supervision loop
             while (scope.isActive && isRunning.get()) {
-                delay(10000)
+                delay(2000)
                 cleanupDeadChannels()
-                val aliveCount = channels.count { it.isConnected.get() }
-                if (aliveCount == 0) {
+                val currentChannels = activeChannelsArray
+                if (currentChannels.isEmpty()) {
                     throw IOException("All SoftEther channels disconnected")
                 }
                 ensureChannelsCount(scope, effectiveTarget)
-                for (ch in channels.filter { it.isConnected.get() }) {
+                for (ch in currentChannels) {
                     ch.sendKeepalive()
                 }
                 if (gatewayMac.contentEquals(SoftEtherFrame.BROADCAST_MAC)) {
@@ -327,7 +338,7 @@ class SoftEtherClient(
 
         // Fallback: Virtual NAT standard configuration
         val fallback = SoftEtherDhcp.defaultFallbackConfig(clientMac)
-        gatewayMac = fallback.serverMac
+        gatewayMac = SoftEtherFrame.BROADCAST_MAC
         myGatewayIpBytes = try { InetAddress.getByName(fallback.gateway).address } catch (_: Exception) { null }
         myClientIpBytes = try { InetAddress.getByName(fallback.clientIp).address } catch (_: Exception) { null }
         listener.onLog("SoftEther using Virtual NAT configuration: IP=${fallback.clientIp}, Gateway=${fallback.gateway}")
@@ -335,62 +346,81 @@ class SoftEtherClient(
         fallback
     }
 
-    private fun handleIncomingEthernetFrame(frame: ByteArray) {
-        totalRxBytes.addAndGet(frame.size.toLong())
+    private fun handleIncomingEthernetFrame(frame: ByteArray, offset: Int, length: Int) {
+        totalRxBytes.addAndGet(length.toLong())
 
         // Drop unicast frames intended for other clients on the virtual switch
-        if (!SoftEtherFrame.isMatchingDestinationMac(frame, clientMac)) {
+        if (!SoftEtherFrame.isMatchingDestinationMac(frame, offset, clientMac)) {
             return
         }
 
+        if (length < SoftEtherFrame.ETHERNET_HEADER_SIZE) return
+
+        val etherType = (((frame[offset + 12].toInt() and 0xFF) shl 8) or (frame[offset + 13].toInt() and 0xFF)).toShort()
+
         // Check for ARP packet (EtherType 0x0806)
-        if (frame.size >= 42) {
-            val etherType = (((frame[12].toInt() and 0xFF) shl 8) or (frame[13].toInt() and 0xFF)).toShort()
-            if (etherType == SoftEtherFrame.ETHER_TYPE_ARP) {
-                handleArpPacket(frame)
-                return
+        if (etherType == SoftEtherFrame.ETHER_TYPE_ARP) {
+            if (length >= 42) {
+                handleArpPacket(frame, offset, length)
             }
+            return
         }
 
         // Check for DHCP packet during negotiation
-        if (pendingDhcpXid != 0 && frame.size >= 282) {
-            val etherType = (((frame[12].toInt() and 0xFF) shl 8) or (frame[13].toInt() and 0xFF)).toShort()
-            if (etherType == SoftEtherFrame.ETHER_TYPE_IPV4) {
-                val resp = SoftEtherDhcp.parseDhcpResponse(frame, frame.size, pendingDhcpXid)
-                if (resp != null) {
-                    dhcpChannel?.trySend(resp)
-                    return
-                }
+        if (pendingDhcpXid != 0 && length >= 282 && etherType == SoftEtherFrame.ETHER_TYPE_IPV4) {
+            val frameCopy = frame.copyOfRange(offset, offset + length)
+            val resp = SoftEtherDhcp.parseDhcpResponse(frameCopy, length, pendingDhcpXid)
+            if (resp != null) {
+                dhcpChannel?.trySend(resp)
+                return
             }
         }
 
-        // Check if it's an IPv4 packet
-        val ipPacket = SoftEtherFrame.unwrapIpv4Payload(frame, frame.size)
-        if (ipPacket != null) {
-            rxPackets.incrementAndGet()
-            val now = System.currentTimeMillis()
-            lastAnyRxMs.set(now)
-            lastUnicastIpRxMs.set(now)
-
-            if (probeInterceptor?.invoke(ipPacket) == true) {
-                return
+        // Check if it's an IPv4 packet (0x0800)
+        if (etherType == SoftEtherFrame.ETHER_TYPE_IPV4) {
+            // Learn Gateway MAC from incoming traffic if currently using broadcast
+            if (gatewayMac.contentEquals(SoftEtherFrame.BROADCAST_MAC) && length >= 14) {
+                val srcMac = ByteArray(6)
+                System.arraycopy(frame, offset + 6, srcMac, 0, 6)
+                if (!srcMac.contentEquals(clientMac)) {
+                    gatewayMac = srcMac
+                    val macStr = srcMac.joinToString(":") { "%02X".format(it) }
+                    listener.onLog("Learned Gateway MAC from traffic: $macStr")
+                }
             }
-            listener.onIpPacketReceived(ipPacket, ipPacket.size)
-            listener.onBytesTransferred(0, ipPacket.size.toLong())
+
+            val actualLen = SoftEtherFrame.getIpv4PayloadLength(frame, offset, length)
+            if (actualLen >= 20) {
+                rxPackets.incrementAndGet()
+                val now = System.currentTimeMillis()
+                lastAnyRxMs.set(now)
+                lastUnicastIpRxMs.set(now)
+
+                val ipOffset = offset + SoftEtherFrame.ETHERNET_HEADER_SIZE
+                if (probeInterceptor != null) {
+                    val ipPacketCopy = frame.copyOfRange(ipOffset, ipOffset + actualLen)
+                    if (probeInterceptor?.invoke(ipPacketCopy) == true) {
+                        return
+                    }
+                }
+
+                listener.onIpPacketReceived(frame, ipOffset, actualLen)
+                listener.onBytesTransferred(0, actualLen.toLong())
+            }
         }
     }
 
-    private fun handleArpPacket(frame: ByteArray) {
-        if (frame.size < 42) return
-        val hwType = ((frame[14].toInt() and 0xFF) shl 8) or (frame[15].toInt() and 0xFF)
-        val protoType = ((frame[16].toInt() and 0xFF) shl 8) or (frame[17].toInt() and 0xFF)
-        val opcode = ((frame[20].toInt() and 0xFF) shl 8) or (frame[21].toInt() and 0xFF)
+    private fun handleArpPacket(frame: ByteArray, offset: Int, length: Int) {
+        if (length < 42) return
+        val hwType = ((frame[offset + 14].toInt() and 0xFF) shl 8) or (frame[offset + 15].toInt() and 0xFF)
+        val protoType = ((frame[offset + 16].toInt() and 0xFF) shl 8) or (frame[offset + 17].toInt() and 0xFF)
+        val opcode = ((frame[offset + 20].toInt() and 0xFF) shl 8) or (frame[offset + 21].toInt() and 0xFF)
         if (hwType != 1 || protoType != 0x0800) return
 
         val senderMac = ByteArray(6)
-        System.arraycopy(frame, 22, senderMac, 0, 6)
+        System.arraycopy(frame, offset + 22, senderMac, 0, 6)
         val senderIp = ByteArray(4)
-        System.arraycopy(frame, 28, senderIp, 0, 4)
+        System.arraycopy(frame, offset + 28, senderIp, 0, 4)
 
         val gBytes = myGatewayIpBytes
         val cBytes = myClientIpBytes
@@ -409,10 +439,10 @@ class SoftEtherClient(
         // 2. Reply to ARP Request ONLY if the target IP is OUR assigned IP
         if (opcode == 1 && cBytes != null) {
             val targetIp = ByteArray(4)
-            System.arraycopy(frame, 38, targetIp, 0, 4)
+            System.arraycopy(frame, offset + 38, targetIp, 0, 4)
 
             if (targetIp.contentEquals(cBytes)) {
-                val reply = ByteArray(42)
+                val reply = ByteArray(60) // Pad to 60 bytes minimum Ethernet frame
                 // Ethernet header: Dst MAC (senderMac), Src MAC (clientMac), EtherType (0x0806)
                 System.arraycopy(senderMac, 0, reply, 0, 6)
                 System.arraycopy(clientMac, 0, reply, 6, 6)
@@ -450,7 +480,7 @@ class SoftEtherClient(
     }
 
     private fun buildArpRequest(srcMac: ByteArray, srcIp: ByteArray, targetIp: ByteArray): ByteArray {
-        val frame = ByteArray(42)
+        val frame = ByteArray(60) // Standard 60-byte minimum Ethernet frame (padded with zeros)
         // Dst MAC: Broadcast FF:FF:FF:FF:FF:FF
         for (i in 0 until 6) frame[i] = 0xFF.toByte()
         // Src MAC: srcMac
@@ -479,28 +509,20 @@ class SoftEtherClient(
 
     /**
      * Send an IP packet received from Android TUN interface.
-     * Encapsulates it into an Ethernet frame and distributes across active TCP channels.
+     * Encapsulates it directly into an Ethernet frame in the channel txBuffer with zero heap allocations.
      */
     override fun sendIpPacket(packet: ByteArray, length: Int) {
         if (!isRunning.get() || length <= 0) return
         try {
-            val activeList = channels.filter { it.isConnected.get() }
-            if (activeList.isEmpty()) return
+            val currentChannels = activeChannelsArray
+            val count = currentChannels.size
+            if (count == 0) return
 
-            val frame = SoftEtherFrame.wrapIpv4Packet(
-                srcMac = clientMac,
-                dstMac = gatewayMac,
-                ipPacket = packet,
-                offset = 0,
-                length = length
-            )
-
-            val count = activeList.size
-            val flowHash = SoftEtherFrame.computeFlowHash(packet, length)
+            val flowHash = SoftEtherFrame.computeFlowHash(packet, 0, length)
             val startIdx = if (flowHash != 0) (flowHash and 0x7FFFFFFF) % count else (txChannelIndex.getAndIncrement() and 0x7FFFFFFF) % count
             for (i in 0 until count) {
-                val ch = activeList[(startIdx + i) % count]
-                if (ch.sendEthernetFrame(frame)) {
+                val ch = currentChannels[(startIdx + i) % count]
+                if (ch.sendIpPacketAsFrame(clientMac, gatewayMac, packet, 0, length)) {
                     txPackets.incrementAndGet()
                     totalTxBytes.addAndGet(length.toLong())
                     listener.onBytesTransferred(length.toLong(), 0)
@@ -513,8 +535,8 @@ class SoftEtherClient(
     }
 
     private fun sendFrameBroadcast(frame: ByteArray) {
-        val activeList = channels.filter { it.isConnected.get() }
-        for (ch in activeList) {
+        val currentChannels = activeChannelsArray
+        for (ch in currentChannels) {
             if (ch.sendEthernetFrame(frame)) {
                 return
             }
@@ -523,9 +545,12 @@ class SoftEtherClient(
 
     private fun cleanupDeadChannels() {
         val dead = channels.filter { !it.isConnected.get() }
-        for (ch in dead) {
-            ch.close()
-            channels.remove(ch)
+        if (dead.isNotEmpty()) {
+            for (ch in dead) {
+                ch.close()
+                channels.remove(ch)
+            }
+            updateActiveChannels()
         }
     }
 
@@ -558,7 +583,9 @@ class SoftEtherClient(
                             existingSessionKey = key
                         )
                         channels.add(ch)
-                        ch.readLoop { frame -> handleIncomingEthernetFrame(frame) }
+                        updateActiveChannels()
+                        listener.onLog("Channel $nextId reconnected (fast-reconnect within 2s cycle)")
+                        ch.readLoop { buffer, offset, length -> handleIncomingEthernetFrame(buffer, offset, length) }
                     } catch (_: Exception) {}
                 }
             }
@@ -572,6 +599,7 @@ class SoftEtherClient(
             ch.close()
         }
         channels.clear()
+        activeChannelsArray = emptyArray()
         listener.onStateChanged(SoftEtherState.DISCONNECTED, "Disconnected")
     }
 }

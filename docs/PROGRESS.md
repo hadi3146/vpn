@@ -1,10 +1,10 @@
 # Radin VPN (`رادین وی‌پی‌ان`) — Project Progress & Engineering Roadmap
 
-**Last Updated:** 2026-11-15  
-**Current Version:** `v1.8.3` (`versionCode = 28`)  
-**Active APK:** `app/build/outputs/apk/debug/RadinVpn 1.8.3-debug.apk` (`30,916,530` bytes / `29.48 MB`)  
+**Last Updated:** 2026-11-18  
+**Current Version:** `v1.9.0` (`versionCode = 35`)  
+**Active APK:** `app/build/outputs/apk/debug/RadinVpn 1.9.0-debug.apk`  
 **Modules:**
-- `:vpncore`: Pure Kotlin protocol library (userspace MS-SSTP, PPP, LCP, RFC 2759 MS-CHAPv2, Crypto Binding CMAC, IPCP, DoT/DoH, CensorshipDetector, MultiServerRacer, SniBypassSocketFactory, TunnelPackets, WireGuard/Cloudflare WARP engine).
+- `:vpncore`: Pure Kotlin protocol library (SoftEther Native Multi-TCP protocol, userspace MS-SSTP, PPP, LCP, RFC 2759 MS-CHAPv2, Crypto Binding CMAC, IPCP, DoT/DoH, CensorshipDetector, MultiServerRacer, SniBypassSocketFactory, TunnelPackets, WireGuard/Cloudflare WARP engine).
 - `:app`: Android application layer (Jetpack Compose, Material 3, Hilt DI, KSP, Room DB, Preferences DataStore, AetherVpnService, WarpService, AetherTileService, BootReceiver, IranRoutingRules).
 **Package ID:** `com.aethervpn.client` (debug: `com.aethervpn.client.debug`, preserved for zero-wipe in-place upgrades).
 
@@ -14,6 +14,7 @@
 
 | Version | Build | Date | Core Milestone & Key Technical Additions |
 | :--- | :---: | :---: | :--- |
+| **`v1.9.0`** | `35` | 2026-11-18 | **SoftEther Native Multi-TCP Engine, Zero-Allocation Data Pump & High-BDP Latency Tuning**: <br>• **Native SoftEther Cedar Protocol (`SoftEtherClient` & `SoftEtherChannel`)**: Full userspace implementation of the native SoftEther protocol (`/vpn/connect.cgi` HTTP 1.1 handshake, `VPNCONNECT` JPEG signature, `SoftEtherPack` RPC encoder/decoder, and SHA0/MD4 password authentication). <br>• **Multi-TCP Channel Bonding**: Concurrent multi-stream TCP connection bonding (2 channels default, scalable to 32) with 5-tuple flow hashing (`computeFlowHash`) to preserve TCP packet sequence ordering across links while aggregating bandwidth. <br>• **Zero-Allocation Fast-Path Data Pump**: Decodes Ethernet frames in-place with zero heap allocations; encapsulates outbound IPv4 packets directly into `ByteBuffer txBuffer` without intermediate `ByteArray` or `System.arraycopy` allocations. Pre-allocated 512KB stream buffers matching high-BDP performance. <br>• **Virtual Layer-2 Switch / NAT Networking**: RFC 826 ARP discovery and reply engine with standard 60-byte minimum Ethernet frame padding; dynamic Gateway MAC address learning from incoming Ethernet traffic; Virtual DHCP client with Option 61 (Client Identifier) support for Japanese and international VPN Gate hubs. <br>• **TCP_NODELAY & Fast 2s Reconnect**: Enabled `TCP_NODELAY` on all SoftEther TLS sockets (disabling Nagle's algorithm for low-latency interactive traffic); reduced channel supervision loop to 2 seconds for instantaneous dead-channel recovery without tunnel resets; calibrated stall watchdog and expanded DNS cache TTL to 30 minutes (`1800L`). Live verified on Samsung Galaxy A54 5G (`SM_A546E`). |
 | **`v1.8.3`** | `28` | 2026-11-15 | **Extreme Censorship Fortification (Universal Custom Configs, WARP Multi-Port Rotation & Emergency Bootstrap)**: <br>• **Cloudflare WARP Multi-Port & In-Flight Rotation**: Expanded Anycast IP candidate pool in `CloudflareCleanIpScanner` to 40+ verified Anycast IPs. Re-architected `WarpService` to execute candidate probe loops across diverse bypass ports (`2408`, `500`, `1701`, `443`, `880`) with automatic in-flight rotation before failing over. Added resilient DNS in `WarpRegistrar` bypassing SNI/DNS poisoning on `api.cloudflareclient.com`. <br>• **Universal Custom Server & Bridge Config Import**: Upgraded `SstpUriCodec` to parse standard modern links: VLESS (`vless://`), Shadowsocks (`ss://` with Base64 and plaintext), Trojan (`trojan://`), WireGuard/WARP (`wg://`, `warp://`), and SSTP. Displays protocol badges (`[VLESS]`, `[SHADOWSOCKS]`, `[TROJAN]`, `[WARP]`) in `ServersScreen`. <br>• **Emergency Directory Bootstrap**: Multi-tier DNS resolution in `ServerRepository` chaining System DNS -> DoT -> DoH with SNI Bypass -> Emergency Core Anycast Direct-IP fallback for core mirror domains during total DNS blackouts. Verified on Samsung Galaxy A54 (`SM_A546E`). |
 | **`v1.8.2`** | `27` | 2026-11-15 | **Video Download & High-BDP Throughput Optimization for Telegram & Instagram**: <br>• **Zero-Allocation Fast Path Data Pump**: Eliminated 3 `ByteArray` allocations and multiple `System.arraycopy` calls per downlink frame in `SstpClient.dataPumpLoop`. Incoming IPv4 data frames (`FF 03 00 21` or `FF 03 21`) are decoded in-place and streamed directly to TUN via `tunOutputStream.write(buf, offset, length)` with 0 heap allocations, completely eliminating Android GC pauses during 4K/HD video downloads. <br>• **TCP Window Scale & Buffer Expansion**: Pre-connect `rawSocket.receiveBufferSize = 2 * 1024 * 1024` (2MB) and `sendBufferSize = 1 * 1024 * 1024` (1MB) to negotiate dynamic TCP Window Scaling during initial SYN handshake. Set `IPTOS_THROUGHPUT` (`0x08`) traffic class. Expanded `SslEngineTransport` internal buffers from 16KB to 64KB. <br>• **Fast-Exit MSS Clamping**: Bypass option parsing for non-SYN TCP packets in `MssClamper.clampMss`. <br>• **Atomic Fast TX Packaging**: Single-write frame assembly in `sendIpPacket` via `txFastBuf` to prevent fragmented TCP ACK writes. <br>• **European CDN Prioritization & Auto-Quarantine Failover**: Prioritized European servers (Amsterdam/Frankfurt) to minimize round-trip latency to Telegram DCs and Instagram edge CDNs. Built-in active verification (`TG=true, IG=true, HTTP=true`) automatically blacklists/quarantines nodes that pass handshake but drop social media traffic. Verified live on Samsung Galaxy A54 (`SM_A546E`). |
 | **`v1.8.1`** | `26` | 2026-11-15 | **BDP Buffering & European Route Sorting Foundation**: Initial integration of European route preference and socket buffer scaling. |
@@ -41,7 +42,33 @@
 
 ---
 
-## 2. Root Cause Analysis & Technical Resolutions (`v1.6.7`)
+## 2. Root Cause Analysis & Technical Resolutions (`v1.9.0` SoftEther Native Engine)
+
+During integration and field testing of the native SoftEther multi-TCP protocol stack on Samsung Galaxy A54 (`SM_A546E`), several critical issues were identified and resolved:
+
+### Root Cause 1: Socket Timeout Expiration on Idle Channels
+- **The Bug:** `SniBypassSocketFactory` configured a default `soTimeout = 10000` (10 seconds) for handshakes. Once the tunnel was established and traffic paused, `readLoop` threw `SocketTimeoutException: Read timed out`, causing the channel reader thread to abort and mark the channel disconnected.
+- **The Mechanism:** Idle periods between network interactions caused all channels to exit simultaneously, triggering `"All SoftEther channels disconnected"` after 10-20 seconds.
+- **The Fix:** Configured `t.setSoTimeout(0)` (infinite timeout) immediately after handshake completion on both primary and secondary channels. Additionally, caught `SocketTimeoutException` inside `readLoop` with `continue` to guarantee infinite channel lifetime during idle state.
+
+### Root Cause 2: Gateway MAC Resolution & Undersized ARP Frames
+- **The Bug:** Fallback DHCP used a static or broadcast MAC address, and initial ARP reply frames were formatted at 42 bytes.
+- **The Mechanism:** Ethernet standards require a minimum frame length of 60 bytes (excluding 4-byte FCS, total 64 bytes on the wire). Virtual switches dropped undersized 42-byte frames, preventing bidirectional gateway communication. Furthermore, when DHCP did not reply with a gateway MAC, unicast frames could not reach the Virtual NAT router.
+- **The Fix:** Padded all ARP frames to the standard 60-byte minimum. Implemented dynamic Gateway MAC learning from the first incoming IPv4 Ethernet frame whenever `gatewayMac` is still broadcast, ensuring reliable Layer-2 packet routing.
+
+### Root Cause 3: DHCP Failure on Academic & Japanese VPN Gate Hubs
+- **The Bug:** Virtual DHCP `DISCOVER` and `REQUEST` packets omitted DHCP Option 61 (Client Identifier).
+- **The Mechanism:** Many SoftEther Virtual Hubs running on academic networks (such as Tsukuba University) ignore DHCP requests lacking hardware client identification (`Option 61: hwType=1, MAC`).
+- **The Fix:** Added Option 61 to both `DISCOVER` and `REQUEST` packet builders in `SoftEtherDhcp.kt`.
+
+### Root Cause 4: Interactive Latency & Buffer Bloat
+- **The Bug:** Nagle's algorithm was enabled by default on underlying TCP sockets, and `txBuffer` allocated intermediate arrays on every transmission.
+- **The Mechanism:** Nagle's algorithm buffered small TCP ACK packets up to 40ms before transmission, making Telegram chat sync and Instagram story loading sluggish.
+- **The Fix:** Enabled `TCP_NODELAY` across all active SoftEther channels. Replaced all intermediate array allocations with direct `ByteBuffer` framing (`sendIpPacketAsFrame`), pre-buffered streams with 512KB buffers, and reduced supervisor loop interval from 10s to 2s for immediate channel heal.
+
+---
+
+## 3. Root Cause Analysis & Technical Resolutions (`v1.6.7`)
 
 In versions `v1.6.5`–`v1.6.6`, live testing on the user's phone (`SM_A546E`) under Iran's network environment showed intermittent connection failures where the client reached the server but was abruptly disconnected with errors such as:
 - `LCP terminated by server during MS-CHAPv2 authentication`
@@ -67,21 +94,22 @@ In versions `v1.6.5`–`v1.6.6`, live testing on the user's phone (`SM_A546E`) u
 
 ---
 
-## 3. Verified Hardware Baseline (Live Test Results)
+## 4. Verified Hardware Baseline (Live Test Results)
 
 - **Device:** Samsung Galaxy A54 5G (`SM_A546E`), Android 16 (API 36 / One UI).
 - **Network Interface:** Wireless ADB (`192.168.100.20:5555`), Iranian domestic Wi-Fi / Cellular.
-- **Tested Build:** `RadinVpn 1.8.2-debug.apk` (`versionCode = 27`, `30,916,394 bytes` / `29.48 MB`).
-- **Live Connection & High-Throughput Verification:**
-  - Auto-Quarantine Failover Engine: Initially connected to Romania (`217.138.212.62:443`). Tunnel handshake succeeded, but in-tunnel verification detected `HTTP=true, TG=false, IG=false`. The engine immediately placed the node in a 20-minute quarantine and executed auto-failover.
-  - Active Node: Japan Tsukuba (`118.156.174.68:1461`).
-  - Active Strategy: `WIFI • ZAPRET_SPLIT1_DESYNC`.
-  - TLS & SSTP Negotiation: Handshake, LCP, MS-CHAPv2 mutual authentication, Crypto Binding CMAC (`hlakReady=true`), and IPCP virtual IP assignment (`10.211.1.103`) completed in under 2 seconds.
-  - Full In-Tunnel Reachability: Confirmed `Tunnel verification: HTTP=true, TG=true, IG=true` (`Connectivity verified`).
+- **Tested Build:** `RadinVpn 1.9.0-debug.apk` (`versionCode = 35`).
+- **Live Connection & Multi-TCP Verification:**
+  - Active Protocol: **SoftEther Native Multi-TCP Protocol** (Cedar engine).
+  - Active Channel Topology: 2 concurrent TCP connections (`targetConnections = 2`) bonded under single Virtual Hub session (`VPNGATE`).
+  - Active Node: Romania (`217.138.212.62:443`) and Japan Tsukuba (`221.71.128.44:1735`).
+  - Strategy: `WIFI • DIRECT_IP_NO_SNI` with `TCP_NODELAY = true`.
+  - Tunnel Stability: Verified sustained connection exceeding 7+ minutes without disconnects (`Duration: 07:24`).
+  - Telegram & Social Media: Telegram chats, real-time incoming messages, and full-resolution media/stories downloaded instantaneously at high throughput with zero stalls.
   - Data Pump & Low-Latency Fast Path:
-    - Zero-allocation fast path active (`FF 03 00 21` frames streamed directly to TUN).
-    - 2MB TCP Window Scale & 1MB Send buffer active.
-    - Status verified live: UI indicator turned green (`Connected`), live bandwidth counters updating smoothly with zero GC pauses.
+    - Zero-allocation Ethernet framing active (`ByteBuffer txBuffer` contiguous writes).
+    - Dynamic Gateway MAC learning active.
+    - 512KB stream buffers and 2s fast supervisor active.
 
 ---
 

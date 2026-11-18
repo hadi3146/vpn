@@ -56,23 +56,32 @@ object SoftEtherFrame {
     }
 
     /**
+     * Checks if an incoming frame is an IPv4 frame and returns its payload length, trimming
+     * Ethernet trailer padding if IPv4 Total Length is less than the Ethernet payload.
+     * Returns -1 if frame is not IPv4 or malformed.
+     */
+    fun getIpv4PayloadLength(frame: ByteArray, offset: Int, length: Int): Int {
+        if (length < ETHERNET_HEADER_SIZE + 20) return -1
+        val etherType = (((frame[offset + 12].toInt() and 0xFF) shl 8) or (frame[offset + 13].toInt() and 0xFF)).toShort()
+        if (etherType != ETHER_TYPE_IPV4) return -1
+
+        val ipPayloadLen = length - ETHERNET_HEADER_SIZE
+        if (ipPayloadLen < 20) return -1
+
+        val ipOffset = offset + ETHERNET_HEADER_SIZE
+        val ipTotalLen = (((frame[ipOffset + 2].toInt() and 0xFF) shl 8) or
+                (frame[ipOffset + 3].toInt() and 0xFF))
+        return if (ipTotalLen in 20..ipPayloadLen) ipTotalLen else ipPayloadLen
+    }
+
+    /**
      * Checks if an incoming frame is an IPv4 frame and returns its payload offset and length.
      * Trims any Ethernet trailer padding if IPv4 Total Length is less than the Ethernet payload.
      * Returns null if frame is not IPv4 (e.g. ARP or malformed).
      */
     fun unwrapIpv4Payload(frame: ByteArray, length: Int): ByteArray? {
-        if (length < ETHERNET_HEADER_SIZE + 20) return null
-        val etherType = (((frame[12].toInt() and 0xFF) shl 8) or (frame[13].toInt() and 0xFF)).toShort()
-        if (etherType != ETHER_TYPE_IPV4) return null
-
-        val ipPayloadLen = length - ETHERNET_HEADER_SIZE
-        if (ipPayloadLen < 20) return null
-
-        // Check IPv4 Total Length to strip Ethernet trailer padding
-        val ipTotalLen = (((frame[ETHERNET_HEADER_SIZE + 2].toInt() and 0xFF) shl 8) or
-                (frame[ETHERNET_HEADER_SIZE + 3].toInt() and 0xFF))
-        val actualLen = if (ipTotalLen in 20..ipPayloadLen) ipTotalLen else ipPayloadLen
-
+        val actualLen = getIpv4PayloadLength(frame, 0, length)
+        if (actualLen < 0) return null
         val ipPacket = ByteArray(actualLen)
         System.arraycopy(frame, ETHERNET_HEADER_SIZE, ipPacket, 0, actualLen)
         return ipPacket
@@ -82,54 +91,60 @@ object SoftEtherFrame {
      * Check if the Ethernet destination MAC matches our client MAC, broadcast, or multicast.
      * Drops unicast frames addressed to other virtual machines/clients on the virtual switch.
      */
-    fun isMatchingDestinationMac(frame: ByteArray, myMac: ByteArray): Boolean {
-        if (frame.size < 6) return false
+    fun isMatchingDestinationMac(frame: ByteArray, offset: Int, myMac: ByteArray): Boolean {
         // 1. Broadcast FF:FF:FF:FF:FF:FF
-        if (frame[0] == 0xFF.toByte() && frame[1] == 0xFF.toByte() &&
-            frame[2] == 0xFF.toByte() && frame[3] == 0xFF.toByte() &&
-            frame[4] == 0xFF.toByte() && frame[5] == 0xFF.toByte()
+        if (frame[offset] == 0xFF.toByte() && frame[offset + 1] == 0xFF.toByte() &&
+            frame[offset + 2] == 0xFF.toByte() && frame[offset + 3] == 0xFF.toByte() &&
+            frame[offset + 4] == 0xFF.toByte() && frame[offset + 5] == 0xFF.toByte()
         ) {
             return true
         }
         // 2. Multicast (least significant bit of first octet is 1)
-        if ((frame[0].toInt() and 0x01) != 0) {
+        if ((frame[offset].toInt() and 0x01) != 0) {
             return true
         }
         // 3. Unicast matching my client MAC
         for (i in 0 until 6) {
-            if (frame[i] != myMac[i]) return false
+            if (frame[offset + i] != myMac[i]) return false
         }
         return true
+    }
+
+    fun isMatchingDestinationMac(frame: ByteArray, myMac: ByteArray): Boolean {
+        if (frame.size < 6) return false
+        return isMatchingDestinationMac(frame, 0, myMac)
     }
 
     /**
      * Compute a 5-tuple flow hash for an IPv4 packet to ensure packets belonging to the
      * same TCP/UDP connection are pinned to the same channel, avoiding TCP packet reordering.
      */
-    fun computeFlowHash(ipPacket: ByteArray, length: Int): Int {
+    fun computeFlowHash(ipPacket: ByteArray, offset: Int, length: Int): Int {
         if (length < 20) return 0
-        val version = (ipPacket[0].toInt() and 0xF0) ushr 4
+        val version = (ipPacket[offset].toInt() and 0xF0) ushr 4
         if (version != 4) return 0
 
-        val proto = ipPacket[9].toInt() and 0xFF
-        val srcIp = (((ipPacket[12].toInt() and 0xFF) shl 24) or
-                ((ipPacket[13].toInt() and 0xFF) shl 16) or
-                ((ipPacket[14].toInt() and 0xFF) shl 8) or
-                (ipPacket[15].toInt() and 0xFF))
-        val dstIp = (((ipPacket[16].toInt() and 0xFF) shl 24) or
-                ((ipPacket[17].toInt() and 0xFF) shl 16) or
-                ((ipPacket[18].toInt() and 0xFF) shl 8) or
-                (ipPacket[19].toInt() and 0xFF))
+        val proto = ipPacket[offset + 9].toInt() and 0xFF
+        val srcIp = (((ipPacket[offset + 12].toInt() and 0xFF) shl 24) or
+                ((ipPacket[offset + 13].toInt() and 0xFF) shl 16) or
+                ((ipPacket[offset + 14].toInt() and 0xFF) shl 8) or
+                (ipPacket[offset + 15].toInt() and 0xFF))
+        val dstIp = (((ipPacket[offset + 16].toInt() and 0xFF) shl 24) or
+                ((ipPacket[offset + 17].toInt() and 0xFF) shl 16) or
+                ((ipPacket[offset + 18].toInt() and 0xFF) shl 8) or
+                (ipPacket[offset + 19].toInt() and 0xFF))
 
         var hash = (srcIp * 31 + dstIp) * 31 + proto
-        val ihl = (ipPacket[0].toInt() and 0x0F) * 4
+        val ihl = (ipPacket[offset].toInt() and 0x0F) * 4
         if ((proto == 6 || proto == 17) && length >= ihl + 4) { // TCP or UDP
-            val srcPort = (((ipPacket[ihl].toInt() and 0xFF) shl 8) or (ipPacket[ihl + 1].toInt() and 0xFF))
-            val dstPort = (((ipPacket[ihl + 2].toInt() and 0xFF) shl 8) or (ipPacket[ihl + 3].toInt() and 0xFF))
+            val srcPort = (((ipPacket[offset + ihl].toInt() and 0xFF) shl 8) or (ipPacket[offset + ihl + 1].toInt() and 0xFF))
+            val dstPort = (((ipPacket[offset + ihl + 2].toInt() and 0xFF) shl 8) or (ipPacket[offset + ihl + 3].toInt() and 0xFF))
             hash = (hash * 31 + srcPort) * 31 + dstPort
         }
         hash = hash xor (hash ushr 16)
         return hash
     }
+
+    fun computeFlowHash(ipPacket: ByteArray, length: Int): Int = computeFlowHash(ipPacket, 0, length)
 }
 

@@ -23,7 +23,7 @@ class SoftEtherClientTest {
         assertEquals("vpn", config.username)
         assertEquals("vpn", config.password)
         assertEquals("VPNGATE", config.hubName)
-        assertEquals(8, config.targetConnections)
+        assertEquals(2, config.targetConnections)
         assertEquals(SniStrategy.AUTO_SMART, config.sniStrategy)
         assertFalse(config.strictCert)
     }
@@ -62,7 +62,7 @@ class SoftEtherClientTest {
                 override fun onConnected(params: SoftEtherVpnParameters) {}
                 override fun onDisconnected(reason: String) {}
                 override fun onError(e: Exception) {}
-                override fun onIpPacketReceived(packet: ByteArray, length: Int) {}
+                override fun onIpPacketReceived(packet: ByteArray, offset: Int, length: Int) {}
             }
         )
 
